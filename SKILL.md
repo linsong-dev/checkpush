@@ -1,0 +1,82 @@
+---
+name: checkpush
+description: "Check before push. Audit encoding (BOM/mojibake/replacement chars), then push to GitHub. Two-step workflow: pre-check (audit only, no git) and push (auto audit gate + git push)."
+---
+
+# 审推·CheckPush
+
+## 插件信息
+
+| 字段 | 内容 |
+|:-----|:------|
+| **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。 |
+| **👤 开发者** | linsong-dev |
+| **📂 类别** | Productivity |
+| **🏷️ 版本** | 1.0.0 |
+| **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
+
+## 工作流程（两步走）
+
+### 第一步：预检（不推送）
+
+```powershell
+python scripts/checkpush.py pre-check --owner linsong-dev --repo my-skill --dir S:\xxx\my-skill
+```
+
+执行内容：
+1. 显示目标信息（owner / repo / 目录）
+2. 全量文件编码审计（BOM / 乱码 / 替换字符 / 编码错误）
+3. 报告问题清单
+4. **不执行任何 git 操作**
+
+---
+
+### 第二步：推送（自动包含审计门禁）
+
+```powershell
+python scripts/checkpush.py push --owner linsong-dev --repo my-skill --dir S:\xxx\my-skill --message "update description"
+```
+
+执行内容：
+1. **STEP 1/3: 自动跑全量审计** → 有问题立即中止，报错退出
+2. **STEP 2/3: 验证 GitHub 仓库是否存在**
+3. **STEP 3/3: git add → commit → push**
+
+---
+
+## 其他命令
+
+| 命令 | 用途 |
+|:-----|:------|
+| `login` | Edge CDP 浏览器登录 GitHub 获取 token |
+| `release` | 创建 Release |
+| `topics` | 设置仓库话题 |
+| `audit` | 单独跑编码审计 |
+
+## 已执行的工作
+
+| # | 日期 | Commit | 工作内容 |
+|:-:|:----|:-------|:---------|
+| 1 | 2026-07-11 | `9ece28c` | 规则文件格式修复 — plain list，引擎加载 55 条规则 |
+| 2 | 2026-07-11 | `05bff50` | 规则整理 — 补充 3 条规则，成功模式去重，AGENTS.md 13→16 |
+| 3 | 2026-07-10 | `86f3cce` | 编码规则同步 + 乱码修复 |
+
+> 待推送：BOM 修复 + rule_powershell_set_content_bom + AGENTS.md 16→17 条
+
+## Configuration
+
+```python
+PROXY = "http://127.0.0.1:3067"
+EDGE_PATH = r"msedge.exe"
+TOKEN_FILE = ".../.gh_token"
+```
+
+## Troubleshooting
+
+| Issue | Fix |
+|:---|:---|
+| Audit 发现问题 | 修复后重跑 pre-check |
+| Push 被审计门禁拦截 | 修复报告中列出的问题 |
+| "No token" | 先跑 login |
+| Edge 无法启动 | 检查 EDGE_PATH |
+| Git push 超时 | 检查代理配置 |

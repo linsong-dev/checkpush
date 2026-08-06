@@ -1,0 +1,16 @@
+# 安全：GitHub token 绝不上传
+.gh_token
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 备份（含 .bak_日期 变体）
+*.bak*
+*_backup_*/
+*.pre_*
+
+# IDE
+.vscode/
+.idea/
