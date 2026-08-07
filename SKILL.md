@@ -1,6 +1,6 @@
 ---
 name: checkpush
-description: "Check before push. Audit encoding (BOM/mojibake/replacement chars), then push to GitHub. Two-step workflow: pre-check (audit only, no git) and push (auto audit gate + git push)."
+description: "Check before push. Audit encoding (BOM/mojibake/replacement chars), then push to GitHub. Workflows: pre-check (audit only, no git), push (auto audit gate + git push), and sync (runtime main -> local source -> audit gate -> git push in one shot)."
 ---
 
 # 审推·CheckPush
@@ -9,10 +9,10 @@ description: "Check before push. Audit encoding (BOM/mojibake/replacement chars)
 
 | 字段 | 内容 |
 |:-----|:------|
-| **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。 |
+| **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息同步（运行版主 → 本地源码 → 审推 → git 一步到位）。 |
 | **👤 开发者** | linsong-dev |
 | **📂 类别** | Productivity |
-| **🏷️ 版本** | 1.0.0 |
+| **🏷️ 版本** | 1.1.0 |
 | **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
 
 ## 工作流程（两步走）
@@ -44,6 +44,22 @@ python scripts/checkpush.py push --owner linsong-dev --repo my-skill --dir S:\xx
 
 ---
 
+### 第三步：插件信息同步（sync，一步到位）
+
+```powershell
+python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xxx\my-skill --run E:\xxx\my-skill --message "sync plugin info"
+```
+
+执行内容：
+1. 对比运行版主目录与本地源码库的插件显示信息文件（SKILL.md / README.md / AGENTS.md / LICENSE / .codex-plugin/plugin.json）
+2. 以运行版主为准，把不一致的文件同步到本地源码库
+3. **自动跑全量审计门禁** → 有问题立即中止，报错退出
+4. git add → commit → push 一步到位
+
+> 通用工具，不绑定任何特定插件：`--run` 指向运行版主目录，`--dir` 指向本地源码库即可。
+
+---
+
 ## 其他命令
 
 | 命令 | 用途 |
@@ -51,7 +67,8 @@ python scripts/checkpush.py push --owner linsong-dev --repo my-skill --dir S:\xx
 | `login` | Edge CDP 浏览器登录 GitHub 获取 token |
 | `release` | 创建 Release |
 | `topics` | 设置仓库话题 |
-| `audit` | 单独跑编码审计 |
+| udit | 单独跑编码审计 |
+| sync | 插件信息同步：运行版主 → 本地源码 → 审推 → git 一步到位 |
 
 ## 已执行的工作
 
@@ -59,9 +76,10 @@ python scripts/checkpush.py push --owner linsong-dev --repo my-skill --dir S:\xx
 |:-:|:----|:-------|:---------|
 | 1 | 2026-07-11 | `9ece28c` | 规则文件格式修复 — plain list，引擎加载 55 条规则 |
 | 2 | 2026-07-11 | `05bff50` | 规则整理 — 补充 3 条规则，成功模式去重，AGENTS.md 13→16 |
-| 3 | 2026-07-10 | `86f3cce` | 编码规则同步 + 乱码修复 |
+| 3 | 2026-07-10 | 86f3cce | 编码规则同步 + 乱码修复 |
+| 4 | 2026-08-07 | `待填` | 新增 sync 插件信息同步（运行版主→本地源码→审推→git 一步到位）+ 插件信息 1.1.0 |
 
-> 待推送：BOM 修复 + rule_powershell_set_content_bom + AGENTS.md 16→17 条
+> 待推送：本轮 1.1.0（sync 新增 + 插件信息更新）
 
 ## Configuration
 

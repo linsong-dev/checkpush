@@ -25,7 +25,16 @@ PROXY = "http://127.0.0.1:3067"
 EDGE_DEBUG_PORT = 9222
 EDGE_PATH = r"msedge.exe"
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), "..", ".gh_token")
-REPO_DIR = os.path.join(os.path.dirname(__file__), "..")
+
+
+# [1.1.0] 插件显示信息文件清单（相对路径：运行版主目录 -> 本地源码库，sync 子命令使用）
+PLUGIN_INFO_FILES = [
+    "SKILL.md",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE",
+    ".codex-plugin/plugin.json",
+]
 
 # ─── HELPERS ─────────────────────────────────────────────────────────
 
@@ -50,6 +59,14 @@ def _run_git(args, cwd, timeout=120):
     out = r.stdout.decode("utf-8", errors="replace")
     err = r.stderr.decode("utf-8", errors="replace")
     return r.returncode, out, err
+
+def _file_hash(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 def assert_edge_running():
     try:
@@ -241,6 +258,40 @@ def cmd_pre_check(owner, repo, repo_dir):
 # PUSH (with auto audit gate)
 # ═══════════════════════════════════════════════════════════════════
 
+def cmd_sync(owner, repo, message, repo_dir, run_dir):
+    """Sync plugin info files from runtime (main) dir into local source repo,
+    then run audit gate + git push in one shot (runtime -> source -> git).
+    Works for any plugin; not tied to a specific runtime.
+    """
+    log("=" * 50)
+    log("SYNC PLUGIN INFO: runtime(main) -> local source -> git")
+    log("=" * 50)
+    run_dir = os.path.abspath(run_dir)
+    if not os.path.isdir(run_dir):
+        raise RuntimeError(f"Runtime dir not found: {run_dir}")
+    changed = []
+    for rel in PLUGIN_INFO_FILES:
+        rp = os.path.join(run_dir, rel.replace("/", os.sep))
+        lp = os.path.join(repo_dir, rel.replace("/", os.sep))
+        if not os.path.exists(rp):
+            continue
+        if os.path.exists(lp) and _file_hash(rp) == _file_hash(lp):
+            log(f"consistent: {rel}")
+            continue
+        os.makedirs(os.path.dirname(lp), exist_ok=True)
+        with open(rp, "rb") as f:
+            data = f.read()
+        with open(lp, "wb") as f:
+            f.write(data)
+        log(f"synced: {rel} (runtime -> source)")
+        changed.append(rel)
+    if not changed:
+        log("All plugin info files consistent. No sync needed.")
+    else:
+        log(f"Sync done: {len(changed)} file(s) updated.")
+    log("Running audit gate + push...")
+    cmd_push(owner, repo, message, repo_dir)
+
 def cmd_push(owner, repo, message, repo_dir):
     """Push local changes (auto-runs audit first)."""
     log("=" * 50)
@@ -381,11 +432,13 @@ def ensure_token(cdp):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="GitHub Publish Automation")
-    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit"],
+    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync"],
                        help="Action: pre-check (audit only, no push) | push (auto audit + push) | ...")
     parser.add_argument("--owner", required=False, help="GitHub owner (e.g. linsong-dev)")
     parser.add_argument("--repo", required=False, help="Repository name")
+    
     parser.add_argument("--dir", help="Repository directory (default: parent of scripts/)")
+    parser.add_argument("--run", help="Runtime (main) directory to sync plugin info from (for 'sync' action)")
     parser.add_argument("--message", default="Update", help="Commit message")
     parser.add_argument("--tag", default="v1.0.0", help="Release tag")
     parser.add_argument("--name", help="Release name (default: same as tag)")
@@ -397,7 +450,7 @@ if __name__ == "__main__":
     parser.add_argument("--data", help="JSON data for API call")
     args = parser.parse_args()
     if args.dir: REPO_DIR = os.path.abspath(args.dir)
-    need_repo = {"push", "release", "topics", "api", "pre-check"}
+    need_repo = {"push", "release", "topics", "api", "pre-check", "sync"}
     if args.action in need_repo and (not args.owner or not args.repo):
         parser.error(f"--owner and --repo are required for '{args.action}' action")
 
@@ -411,6 +464,9 @@ if __name__ == "__main__":
         cmd_release(args.owner, args.repo, args.tag, args.name or args.tag, args.body, args.prerelease)
     elif args.action == "topics":
         cmd_set_topics(args.owner, args.repo, args.topics or ["codex", "codex-skill"])
+    elif args.action == "sync":
+        if not args.run: parser.error("--run is required for 'sync' action")
+        cmd_sync(args.owner, args.repo, args.message, REPO_DIR, args.run)
     elif args.action == "audit":
         cmd_audit(REPO_DIR)
     elif args.action == "api":
