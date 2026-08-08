@@ -1,15 +1,15 @@
 {
     "name": "checkpush",
     "version": "1.4.0",
-    "description": "审推·CheckPush — 自动化发布 Codex 技能到 GitHub，推送前自动编码预检（BOM/乱码/替换字符），有问题退回，通过才推。支持插件信息同步：运行版主 → 本地源码 → 审推 → git 一步到位。",
+    "description": "审推·CheckPush — 自动化发布 Codex 技能到 GitHub，推送前自动编码预检（BOM/乱码/替换字符），有问题退回，通过才推。支持插件信息一键同步：运行版主 → 本地源码 → 审推 → git → 可选插件重装。",
     "author": {
         "name": "linsong-dev"
     },
     "skills": "./",
     "interface": {
         "displayName": "审推·CheckPush",
-        "shortDescription": "自动化发布技能到 GitHub，先审后推，支持插件信息同步",
-        "longDescription": "审推·CheckPush 覆盖 GitHub 发布全流程：推送前编码预检（BOM/乱码/替换字符/编码错误）→ 审核报告 → 通过后自动 git push。工作流：pre-check 只审不推，push 自动跑审计门禁，sync 一键同步插件信息（运行版主 → 本地源码 → 审推 → git 一步到位）。支持 Edge CDP 浏览器登录、Release 创建、仓库话题管理。",
+        "shortDescription": "自动化发布技能到 GitHub，先审后推，支持插件信息一键同步",
+        "longDescription": "审推·CheckPush 覆盖 GitHub 发布全流程：推送前编码预检（BOM/乱码/替换字符/编码错误）→ 审核报告 → 通过后自动 git push。工作流：pre-check 只审不推；push 自动跑审计门禁；sync 一键同步插件信息与技能资源（运行版主 → 本地源码 → 审推 → git → 可选重装，含 engine/hooks/config/references/agents，参照系统插件结构）；audit 单独跑编码审计。支持 Edge CDP 浏览器登录、Release 创建、仓库话题管理。",
         "developerName": "linsong-dev",
         "category": "Productivity",
         "capabilities": [

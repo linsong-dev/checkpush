@@ -1,6 +1,6 @@
 ---
 name: checkpush
-description: "Check before push. Audit encoding (BOM/mojibake/replacement chars), then push to GitHub. Workflows: pre-check (audit only, no git), push (auto audit gate + git push), and sync (runtime main -> local source -> audit gate -> git push in one shot)."
+description: "Check before push. Audit encoding (BOM/mojibake/replacement chars), then push to GitHub. Workflows: pre-check (audit only, no git), push (auto audit gate + git push), sync (runtime main -> local source -> audit gate -> git -> optional plugin reinstall), and audit (standalone)."
 ---
 
 # 审推·CheckPush
@@ -9,13 +9,13 @@ description: "Check before push. Audit encoding (BOM/mojibake/replacement chars)
 
 | 字段 | 内容 |
 |:-----|:------|
-| **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息同步（运行版主 → 本地源码 → 审推 → git 一步到位）。 |
+| **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息一键同步（运行版主 → 本地源码 → 审推 → git → 可选重装，含插件显示信息 + 技能资源目录）。 |
 | **👤 开发者** | linsong-dev |
 | **📂 类别** | Productivity |
 | **🏷️ 版本** | 1.4.0 |
 | **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
 
-## 工作流程（两步走）
+## 工作流程（四命令：pre-check / push / sync / audit）
 
 ### 第一步：预检（不推送）
 
@@ -58,7 +58,12 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 2. 以运行版主为准，把不一致的文件同步到本地源码库
 3. **自动跑全量审计门禁** → 有问题立即中止，报错退出
 4. git add → commit → push 一步到位
-5. 提供 `--agents` + `--plugin` 时：同步 .agents 插件源（skills/README/AGENTS/LICENSE/assets）→ bump cachebuster → `codex plugin add <plugin>@<marketplace>` 重装
+5. 提供 `--agents` + `--plugin` 时，重装插件（参照系统自带插件结构）：
+   - 同步 .agents 插件源：README/AGENTS/LICENSE/plugin.json + assets/
+   - 同步技能资源到 skills/<name>/：engine/、hooks/、config/、references/、agents/、workspace/dgen_rules.md、requirements.txt
+   - 剔除运行状态与备份：var/、workspace 状态、*.bak/.pre_/.err_/_backup_/__pycache__
+   - bump cachebuster（版本前缀不变，仅换 `+codex.<UTC时间戳>`）
+   - `codex plugin add <plugin>@<marketplace>` 重装 → UI 显示信息立即更新（无需重启）
 
 > 通用工具，不绑定任何特定插件：`--run` 指向运行版主目录，`--dir` 指向本地源码库即可。
 
@@ -71,8 +76,8 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | `login` | Edge CDP 浏览器登录 GitHub 获取 token |
 | `release` | 创建 Release |
 | `topics` | 设置仓库话题 |
-| udit | 单独跑编码审计 |
-| sync | 插件信息同步：运行版主 → 本地源码 → 审推 → git 一步到位 |
+| `audit` | 单独跑编码审计 |
+| `sync` | 插件信息一键同步：运行版主 → 本地源码 → 审推 → git → 可选重装 |
 
 ## 已执行的工作
 
@@ -80,14 +85,14 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 |:-:|:----|:-------|:---------|
 | 1 | 2026-07-11 | `9ece28c` | 规则文件格式修复 — plain list，引擎加载 55 条规则 |
 | 2 | 2026-07-11 | `05bff50` | 规则整理 — 补充 3 条规则，成功模式去重，AGENTS.md 13→16 |
-| 3 | 2026-07-10 | 86f3cce | 编码规则同步 + 乱码修复 |
+| 3 | 2026-07-10 | `86f3cce` | 编码规则同步 + 乱码修复 |
 | 4 | 2026-08-07 | `d912916` | 新增 sync 插件信息同步（运行版主→本地源码→审推→git 一步到位）+ 插件信息 1.1.0 |
 | 5 | 2026-08-08 | `610aebe` | sync 一键化：assets 资源同步 + --agents/--plugin 重装（.agents 源→cachebuster→codex plugin add）；参照系统自带插件结构补齐插件包（README/AGENTS/LICENSE/assets）+ 插件信息 1.2.0 |
 | 6 | 2026-08-08 | `932c2c5` | 一键化加固：代理不可用 git push 直连 + 技能目录自适应检测 + utcnow 弃用修复；diegin/mindol 插件包已按系统结构补齐并重装 |
 | 7 | 2026-08-08 | `9c02103` | 技能资源目录同步（engine/hooks/config/references/agents + dgen_rules.md/requirements.txt）→ 插件包 skills/<name>/ 对齐系统插件结构 + 插件信息 1.3.0 |
-| 8 | 2026-08-08 | `待填` | 修复重装不同步 plugin.json 的 bug（插件自述原则顺序守三+攻七→攻七+守三）→ .agents/缓存全链路一致；规则 JSON 乱码修复；token 失效经 git credential fill 恢复 + 插件信息 1.4.0 |
+| 8 | 2026-08-08 | `79bbb4d` | 修复重装不同步 plugin.json 的 bug（插件自述原则顺序守三+攻七→攻七+守三）→ .agents/缓存全链路一致；规则 JSON 乱码修复；token 失效经 git credential fill 恢复 + 插件信息 1.4.0 |
 
-> 待推送：1.4.0（重装同步 plugin.json + 乱码修复 + token 恢复）
+> 已发布：1.4.0（`79bbb4d`，2026-08-08）
 
 ## Configuration
 
