@@ -82,9 +82,10 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | 2 | 2026-07-11 | `05bff50` | 规则整理 — 补充 3 条规则，成功模式去重，AGENTS.md 13→16 |
 | 3 | 2026-07-10 | 86f3cce | 编码规则同步 + 乱码修复 |
 | 4 | 2026-08-07 | `d912916` | 新增 sync 插件信息同步（运行版主→本地源码→审推→git 一步到位）+ 插件信息 1.1.0 |
-| 5 | 2026-08-08 | `待填` | sync 一键化：assets 资源同步 + --agents/--plugin 重装（.agents 源→cachebuster→codex plugin add）；参照系统自带插件结构补齐插件包（README/AGENTS/LICENSE/assets）+ 插件信息 1.2.0 |
+| 5 | 2026-08-08 | `610aebe` | sync 一键化：assets 资源同步 + --agents/--plugin 重装（.agents 源→cachebuster→codex plugin add）；参照系统自带插件结构补齐插件包（README/AGENTS/LICENSE/assets）+ 插件信息 1.2.0 |
+| 6 | 2026-08-08 | `待填` | 一键化加固：代理不可用 git push 直连 + 技能目录自适应检测 + utcnow 弃用修复；diegin/mindol 插件包已按系统结构补齐并重装 |
 
-> 待推送：1.2.0（sync 一键化 + 插件包结构补齐）
+> 已发布：1.2.0（610aebe）；待推送：一键化加固（直连 + 技能目录自适应）
 
 ## Configuration
 

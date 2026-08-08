@@ -117,7 +117,7 @@ def _bump_cachebuster(plugin_json):
         raise RuntimeError(f"No version field in {plugin_json}")
     ver = m.group(1).decode("utf-8", errors="replace")
     prefix = ver.split("+")[0] if "+" in ver else ver
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
     new_ver = f"{prefix}+codex.{ts}"
     data = data.replace(m.group(0), b'"version": "' + new_ver.encode() + b'"', 1)
     with open(plugin_json, "wb") as f:
@@ -134,11 +134,19 @@ def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
     agents_dir = os.path.abspath(agents_dir)
     if not os.path.isdir(agents_dir):
         raise RuntimeError(f"Agents plugin dir not found: {agents_dir}")
+    skill_dir = os.path.join(agents_dir, "skills", plugin)
+    skills_root = os.path.join(agents_dir, "skills")
+    if not os.path.isdir(skill_dir) and os.path.isdir(skills_root):
+        existing = [d for d in os.listdir(skills_root)
+                    if os.path.isdir(os.path.join(skills_root, d))]
+        if existing:
+            skill_dir = os.path.join(skills_root, existing[0])
+            log(f"skill dir: detected '{existing[0]}' (plugin '{plugin}')")
     src_skill = os.path.join(run_dir, "SKILL.md")
     if not os.path.exists(src_skill):
         src_skill = os.path.join(run_dir, "skills", "SKILL.md")
     if os.path.exists(src_skill):
-        _copy_if_diff(src_skill, os.path.join(agents_dir, "skills", plugin, "SKILL.md"), f"skills/{plugin}/SKILL.md")
+        _copy_if_diff(src_skill, os.path.join(skill_dir, "SKILL.md"), f"skills/{os.path.basename(skill_dir)}/SKILL.md")
     for rel in ("README.md", "AGENTS.md", "LICENSE"):
         rp = os.path.join(run_dir, rel)
         if os.path.exists(rp):
@@ -381,7 +389,9 @@ def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=No
         rd = os.path.join(run_dir, d)
         ld = os.path.join(repo_dir, d)
         if os.path.isdir(rd):
-            changed += _copy_tree_if_diff(rd, ld, d)
+            n = _copy_tree_if_diff(rd, ld, d)
+            if n:
+                changed.append(d)
     if not changed:
         log("All plugin info files consistent. No sync needed.")
     else:
@@ -448,11 +458,16 @@ def cmd_push(owner, repo, message, repo_dir):
     branch = out2.strip() or "main"
 
     push_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+    push_cmd = ["git", "push", push_url, branch]
+    if not _proxy_ok():
+        # [1.2.0] 代理不可用 -> git push 直连（清除仓库级 http.proxy 配置）
+        log("proxy unavailable -> git push direct connection")
+        push_cmd = ["git", "-c", "http.proxy=", "-c", "https.proxy=", "push", push_url, branch]
     log(f"Pushing to {owner}/{repo} ({branch})...")
     last_err = None
     pushed = False
     for attempt in range(1, 4):
-        rc3, out3, err3 = _run_git(["git", "push", push_url, branch], repo_dir)
+        rc3, out3, err3 = _run_git(push_cmd, repo_dir)
         if out3.strip(): log(f"stdout: {out3.strip()[:200]}")
         if err3.strip(): log(f"stderr: {err3.strip()[:300]}")
         if rc3 == 0:
