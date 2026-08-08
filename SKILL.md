@@ -91,8 +91,9 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | 6 | 2026-08-08 | `932c2c5` | 一键化加固：代理不可用 git push 直连 + 技能目录自适应检测 + utcnow 弃用修复；diegin/mindol 插件包已按系统结构补齐并重装 |
 | 7 | 2026-08-08 | `9c02103` | 技能资源目录同步（engine/hooks/config/references/agents + dgen_rules.md/requirements.txt）→ 插件包 skills/<name>/ 对齐系统插件结构 + 插件信息 1.3.0 |
 | 8 | 2026-08-08 | `79bbb4d` | 修复重装不同步 plugin.json 的 bug（插件自述原则顺序守三+攻七→攻七+守三）→ .agents/缓存全链路一致；规则 JSON 乱码修复；token 失效经 git credential fill 恢复 + 插件信息 1.4.0 |
+| 9 | 2026-08-08 | `5e8e27c` | 整理归纳审推工作流（四命令 pre-check/push/sync/audit + 技能资源同步 + 重装流程 + 执行内存表回填）+ plugin 描述同步 1.4.0 |
 
-> 已发布：1.4.0（`79bbb4d`，2026-08-08）
+> 已发布：1.4.0（`79bbb4d` + `5e8e27c`，2026-08-08）
 
 ## Configuration
 
