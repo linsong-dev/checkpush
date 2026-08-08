@@ -49,6 +49,42 @@ PLUGIN_SKILL_EXTRA = [
 SKILL_DIR_EXCLUDES = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "_test_", "__pycache__", ".pytest_cache")
 SKILL_DIR_EXCLUDED_DIRS = ("var", "workspace", ".git")
 
+# ─── [2.0] 敏感信息审计配置 ─────────────────────────────────────────
+# SENSITIVE_PATTERNS: 命中即阻断的敏感内容（正则，大小写不敏感）
+#   - 个人绝对路径：Windows 用户目录 / 本机便携版路径 / 本机开发目录
+#   - 用户名 / token 模式
+SENSITIVE_PATTERNS = [
+    r"C:\\Users\\[^\\\"']+",          # Windows 用户目录绝对路径
+    r"E:\\项目\\Codex_便携版",           # 本机便携版安装路径
+    r"E:\\项目\\开发",                   # 本机开发目录
+    r"ghp_[A-Za-z0-9]{20,}",                 # GitHub PAT
+    r"github_pat_[A-Za-z0-9_]{20,}",         # GitHub fine-grained PAT
+    r"gho_[A-Za-z0-9]{20,}",                 # GitHub OAuth
+    r"ghs_[A-Za-z0-9]{20,}",
+    r"ghr_[A-Za-z0-9]{20,}",
+    r"x-access-token:[^\s@]+@",             # token 注入 URL
+    r"sk-[A-Za-z0-9]{20,}",                  # OpenAI key 形态
+    r"AIza[0-9A-Za-z_-]{20,}",               # Google API key 形态
+]
+
+# SENSITIVE_FILENAMES: 被 git 跟踪即阻断的敏感文件（基名/模式匹配）
+SENSITIVE_FILENAMES = [
+    ".gh_token", ".env", ".npmrc", ".pypirc",
+    "id_rsa", "id_ed25519", "*.pem", "*.key",
+    "auth.json", "auth.enc", "*.der", "*.pfx",
+    "*.token", "*_token*.txt",
+]
+
+# SENSITIVE_MAP: sanitize --apply 替换映射（个人路径 -> 占位符，白名单精确替换）
+SENSITIVE_MAP = [
+    (r"E:\项目\Codex_便携版", r"%CODEX_HOME%"),
+    (r"E:\项目\开发", r"%DEV_ROOT%"),
+    (r"C:\Users\Administrator", r"$env:USERPROFILE"),
+]
+
+# 历史泄露检测模式（git log -S 扫描，命中仅警告——修复需重写历史+force push，人工决策）
+HISTORY_SENSITIVE_HINTS = ["Administrator", "Codex_便携版", "E:\\项目\\开发"]
+
 # ─── HELPERS ─────────────────────────────────────────────────────────
 
 def log(msg):
@@ -108,16 +144,19 @@ def _copy_tree_if_diff(src_dir, dst_dir, label, excludes=(), exclude_dirs=()):
     return changed
 
 def _codex_cli():
-    """Locate the Codex CLI binary: env override, portable default, then PATH."""
+    """Locate the Codex CLI binary: env override, portable default, then PATH.
+    [2.0] 不再硬编码个人绝对路径（敏感信息）；仅用环境变量 + PATH + 常见相对位置。"""
     env = os.environ.get("CODEX_CLI_PATH")
     if env and os.path.exists(env):
         return env
-    for cand in (
-        r"E:\项目\Codex_便携版\OpenAI.Codex\app\resources\codex.exe",
-        r"C:\Users\Administrator\AppData\Local\Programs\OpenAI.Codex\codex.exe",
-    ):
-        if os.path.exists(cand):
-            return cand
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex.exe")
+    if os.path.exists(local):
+        return local
+    import shutil
+    found = shutil.which("codex")
+    if found:
+        return found
+    return "codex"  # 兜底：交给 PATH 解析
     return "codex"
 
 def _bump_cachebuster(plugin_json):
@@ -295,7 +334,113 @@ def _git_ignored(repo_dir, rel_path):
     except Exception:
         return False
 
+def _fnmatch_base(fname, pat):
+    """基名匹配：支持 * 通配；匹配成功返回 True"""
+    import fnmatch
+    return fnmatch.fnmatch(fname.lower(), pat.lower())
+
+def _is_allowed(hit, line):
+    """[2.0] 敏感命中豁免：工具自身配置定义 / 文档示例占位符，不算泄露"""
+    if "<user>" in hit or "$env:USERPROFILE" in line or "%USERPROFILE%" in line:
+        return True
+    if "{token}" in line or "{owner}" in line or "your_token" in line:
+        return True
+    if any(k in line for k in (
+        "SENSITIVE_PATTERNS =", "SENSITIVE_MAP =", "SENSITIVE_FILENAMES =",
+        "HISTORY_SENSITIVE_HINTS =", "def _scan_sensitive", "def _is_allowed",
+        "def cmd_sanitize", "# ─── [2.0] 敏感信息审计配置",
+    )):
+        return True
+    return False
+
+def _scan_sensitive(repo_dir):
+    """[2.0] 敏感信息扫描（个人路径/用户名/token/密钥文件）。
+    返回 (阻断 issues, 警告 warnings)。issue 元组: (rel, "SENSITIVE", detail)"""
+    issues, warns = [], []
+    TEXT_EXTS = {".py",".md",".json",".txt",".ps1",".toml",".yaml",".yml",".ini",".cfg",".conf",".js",".ts",".html",".css",".xml",".bat",".cmd",".sh",".env",".gitignore",".yml",".lock"}
+    pats = [(re.compile(p, re.IGNORECASE), p) for p in SENSITIVE_PATTERNS]
+    # 先查被 git 跟踪的敏感文件名
+    rc, out, _ = _run_git(["git", "ls-files"], repo_dir)
+    tracked = out.splitlines() if rc == 0 else []
+    for rel in tracked:
+        base = os.path.basename(rel)
+        for sp in SENSITIVE_FILENAMES:
+            if _fnmatch_base(base, sp):
+                issues.append((rel, "SENSITIVE-FILE", f"tracked sensitive file pattern: {sp}"))
+                break
+    # 再逐文件扫内容
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__"]
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, repo_dir).replace(os.sep, "/")
+            if _git_ignored(repo_dir, rel):
+                continue
+            _, ext = os.path.splitext(fname)
+            if ext.lower() not in TEXT_EXTS:
+                continue
+            # [2.0] 工具自身配置块行区间豁免（SENSITIVE_* 定义，非泄露）
+            cfg_lines = set()
+            if os.path.basename(fpath) == "checkpush.py":
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as _fh:
+                        _all = _fh.readlines()
+                    for _i, _l in enumerate(_all, 1):
+                        if any(_k in _l for _k in ("SENSITIVE_PATTERNS =", "SENSITIVE_MAP =",
+                                                   "SENSITIVE_FILENAMES =", "HISTORY_SENSITIVE_HINTS =")):
+                            cfg_lines.add(_i)
+                            _j = _i + 1
+                            while _j <= len(_all) and _all[_j-1].strip() and not _all[_j-1].strip().startswith(("def ", "# ═", "# ─")):
+                                cfg_lines.add(_j)
+                                _j += 1
+                except Exception:
+                    pass
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                    for i, line in enumerate(fh, 1):
+                        if i in cfg_lines:
+                            continue
+                        for rx, pat in pats:
+                            m = rx.search(line)
+                            if m:
+                                hit = m.group(0)
+                                if _is_allowed(hit, line):
+                                    continue  # 工具配置定义/文档占位符豁免
+                                issues.append((rel, "SENSITIVE", f"L{i} ~{pat}~: {hit[:40]}"))
+                                break
+            except Exception:
+                pass
+    return issues, warns
+
+def _scan_git_health(repo_dir):
+    """[2.0] git 卫生扫描：备份残留被跟踪 / 未忽略敏感文件 / 历史泄露提示。
+    返回 (阻断 issues, 警告 warnings)"""
+    issues, warns = [], []
+    rc, out, _ = _run_git(["git", "ls-files"], repo_dir)
+    tracked = out.splitlines() if rc == 0 else []
+    BAK_PATS = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "_test_", "__pycache__", ".pytest_cache")
+    for rel in tracked:
+        low = rel.lower()
+        if any(p in low for p in BAK_PATS):
+            warns.append((rel, "GIT-BACKUP", "tracked backup/residue file"))
+    # 未忽略的敏感文件（若存在且未被 git 忽略 -> 可能被 git add -A 误提交）
+    for fname in [".gh_token", ".env", "auth.json", "memory.db"]:
+        p = os.path.join(repo_dir, fname)
+        if os.path.exists(p) and not _git_ignored(repo_dir, fname):
+            issues.append((fname, "GIT-UNIGNORED", "sensitive file exists but NOT git-ignored"))
+    # 历史泄露提示（只警告，重写历史需人工决策）
+    for hint in HISTORY_SENSITIVE_HINTS:
+        try:
+            rc2, out2, _ = _run_git(["git", "log", "--all", "--oneline", "-S", hint], repo_dir, timeout=60)
+            if rc2 == 0 and out2.strip():
+                warns.append(("HISTORY", "GIT-HISTORY", f"history contains {hint!r}: {out2.strip().splitlines()[0][:80]}"))
+        except Exception:
+            pass
+    return issues, warns
+
 def cmd_audit(repo_dir):
+    """Audit repository files for encoding/bom issues. Returns (ok_count, issues_list)."""
+    STRONG_MOJIBAKE = {0x00a0,0x00a1,0x00a2,0x00a3,0x00a4,0x00a5,0x00a6,0x00a7,0x00a8,0x00a9,0x00aa,0x00ab,0x00ac,0x00ae,0x00af,0x00b0,0x00b1,0x00b2,0x00b3,0x00b4,0x00b5,0x00b6,0x00b7}
     """Audit repository files for encoding/bom issues. Returns (ok_count, issues_list)."""
     STRONG_MOJIBAKE = {0x00a0,0x00a1,0x00a2,0x00a3,0x00a4,0x00a5,0x00a6,0x00a7,0x00a8,0x00a9,0x00aa,0x00ab,0x00ac,0x00ae,0x00af,0x00b0,0x00b1,0x00b2,0x00b3,0x00b4,0x00b5,0x00b6,0x00b7}
     SAFE_CHARS = {0x2018,0x2019,0x201c,0x201d,0x2013,0x2014,0x2026}
@@ -345,18 +490,99 @@ def cmd_audit(repo_dir):
                     issues.append((rel, "GARBLED", f"L{i+1}: {s[:60]}")); break
             ok += 1
 
+    # [2.0] 敏感信息 + git 卫生 扫描（并入总门禁）
+    sens_issues, sens_warns = _scan_sensitive(repo_dir)
+    git_issues, git_warns = _scan_git_health(repo_dir)
+    issues += sens_issues + git_issues
+    warns = sens_warns + git_warns
+
     print(); print("=" * 60)
     print(f"  AUDIT: {repo_dir}")
-    print(f"  OK: {ok} files  |  Issues: {len(issues)}  |  Skipped: {skipped}")
+    print(f"  OK: {ok} files  |  Issues: {len(issues)}  |  Warnings: {len(warns)}  |  Skipped: {skipped}")
     print("=" * 60)
     if issues:
         print(); print(f"  {'FILE':50s} {'TYPE':15s} DETAIL"); print(f"  {'-'*48} {'-'*15} {'-'*40}")
         for rel, typ, detail in issues:
             print(f"  [!] {rel[:48]:48s} {typ:15s} {detail[:60]}")
-        print(f"  >>> {len(issues)} issue(s) found. Fix before push. <<<")
+        print(f"  >>> {len(issues)} issue(s) found (BLOCKING). Fix before push. <<<")
+    elif warns:
+        print(f"  >>> {len(warns)} warning(s) (non-blocking, review). <<<")
+        for rel, typ, detail in warns[:20]:
+            print(f"  [~] {rel[:48]:48s} {typ:15s} {detail[:60]}")
+        if len(warns) > 20:
+            print(f"  ... and {len(warns)-20} more warning(s)")
     else:
         print(f"  >>> ALL CLEAN. Ready to push. <<<")
     return ok, issues
+
+# [2.0] SANITIZE: 敏感信息自动脱敏（替换为占位符）
+def cmd_sanitize(repo_dir, apply=False):
+    """Scan + optionally replace personal paths with placeholders.
+    --apply 实际替换；不带 --apply 只列出命中行（安全预览）。
+    return: (hit_count, replaced_count)"""
+    hits, replaced = [], 0
+    TEXT_EXTS = {".py",".md",".json",".txt",".ps1",".toml",".yaml",".yml",".ini",".cfg",".conf",".js",".ts",".html",".css",".xml",".bat",".cmd",".sh",".env",".gitignore"}
+    # 字面路径使用 re.escape：避免 \项 等无效转义，且防止路径中的正则元字符误匹配
+    pairs = [(re.compile(re.escape(pat), re.IGNORECASE), repl) for pat, repl in SENSITIVE_MAP]
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__" and d != ".git"]
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, repo_dir)
+            if _git_ignored(repo_dir, rel.replace(os.sep, "/")):
+                continue
+            _, ext = os.path.splitext(fname)
+            if ext.lower() not in TEXT_EXTS:
+                continue
+            cfg_lines = set()
+            if os.path.basename(fpath) == "checkpush.py":
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as _fh:
+                        _all = _fh.readlines()
+                    for _i, _l in enumerate(_all, 1):
+                        if any(_k in _l for _k in ("SENSITIVE_PATTERNS =", "SENSITIVE_MAP =",
+                                                   "SENSITIVE_FILENAMES =", "HISTORY_SENSITIVE_HINTS =")):
+                            cfg_lines.add(_i)
+                            _j = _i + 1
+                            while _j <= len(_all) and _all[_j-1].strip() and not _all[_j-1].strip().startswith(("def ", "# ═", "# ─")):
+                                cfg_lines.add(_j)
+                                _j += 1
+                except Exception:
+                    pass
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            except Exception:
+                continue
+            changed = False
+            for i, line in enumerate(lines):
+                if i + 1 in cfg_lines:
+                    continue
+                for rx, repl in pairs:
+                    if rx.search(line):
+                        hits.append((rel, i + 1, rx.pattern))
+                        if apply:
+                            lines[i] = rx.sub(repl, line)
+                            changed = True
+                        break
+            if changed:
+                with open(fpath, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.writelines(lines)
+                replaced += 1
+    print(); print("=" * 60)
+    print(f"  SANITIZE: {repo_dir}")
+    print(f"  Hits: {len(hits)}  |  Files rewritten: {replaced}  |  Apply: {apply}")
+    print("=" * 60)
+    for rel, lineno, pat in hits[:50]:
+        print(f"  [~] {rel}:L{lineno} ~{pat}~")
+    if len(hits) > 50:
+        print(f"  ... and {len(hits)-50} more")
+    if apply:
+        print("  >>> Done. Run pre-check to confirm ALL CLEAN. <<<")
+    else:
+        print("  >>> Preview only. Re-run with --apply to replace. <<<")
+    return len(hits), replaced
+
 
 # ═══════════════════════════════════════════════════════════════════
 # PRE-CHECK: audit + target info confirmation (no push)
@@ -501,6 +727,17 @@ def cmd_push(owner, repo, message, repo_dir):
         time.sleep(2 ** attempt)
     if not pushed:
         raise RuntimeError(f"Push failed after 3 attempts: {last_err}")
+
+    # [2.0] STEP 4: push 后远端同步验证（fetch + rev-list）
+    log("=" * 50)
+    log("STEP 4/4: Verify remote sync")
+    log("=" * 50)
+    try:
+        _run_git(["git", "fetch", "origin"], repo_dir)
+        rc4, out4, _ = _run_git(["git", "rev-list", "--count", "--left-right", f"origin/{branch}...HEAD"], repo_dir)
+        log(f"remote vs local: {out4.strip()}  (left=behind right=ahead; '0\t0' = synced)")
+    except Exception as e:
+        log(f"verify skipped: {e}")
     log("Push successful.")
 
 # ═══════════════════════════════════════════════════════════════════
@@ -569,7 +806,7 @@ def ensure_token(cdp):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="GitHub Publish Automation")
-    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync"],
+    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize"],
                        help="Action: pre-check (audit only, no push) | push (auto audit + push) | ...")
     parser.add_argument("--owner", required=False, help="GitHub owner (e.g. linsong-dev)")
     parser.add_argument("--repo", required=False, help="Repository name")
@@ -584,6 +821,7 @@ if __name__ == "__main__":
     parser.add_argument("--name", help="Release name (default: same as tag)")
     parser.add_argument("--body", default="", help="Release body/notes")
     parser.add_argument("--prerelease", action="store_true", help="Mark as prerelease")
+    parser.add_argument("--apply", action="store_true", help="sanitize: actually replace (default: preview only)")
     parser.add_argument("--topics", nargs="+", help="Repository topics")
     parser.add_argument("--method", help="HTTP method for API call")
     parser.add_argument("--path", help="API path for API call")
@@ -609,6 +847,8 @@ if __name__ == "__main__":
         cmd_sync(args.owner, args.repo, args.message, REPO_DIR, args.run, args.agents, args.plugin, args.marketplace)
     elif args.action == "audit":
         cmd_audit(REPO_DIR)
+    elif args.action == "sanitize":
+        cmd_sanitize(REPO_DIR, apply=args.apply)
     elif args.action == "api":
         token = read_token()
         if not token: raise RuntimeError("No token. Run login first.")
