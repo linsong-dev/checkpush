@@ -1,6 +1,6 @@
 {
     "name": "checkpush",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "审推·CheckPush — 自动化发布 Codex 技能到 GitHub，推送前自动编码预检（BOM/乱码/替换字符），有问题退回，通过才推。支持插件信息同步：运行版主 → 本地源码 → 审推 → git 一步到位。",
     "author": {
         "name": "linsong-dev"

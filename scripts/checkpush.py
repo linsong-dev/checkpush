@@ -36,6 +36,9 @@ PLUGIN_INFO_FILES = [
     ".codex-plugin/plugin.json",
 ]
 
+# [1.2.0] 插件资源目录（存在才同步，递归复制）
+PLUGIN_ASSET_DIRS = ["assets"]
+
 # ─── HELPERS ─────────────────────────────────────────────────────────
 
 def log(msg):
@@ -67,6 +70,96 @@ def _file_hash(path):
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+def _copy_if_diff(src, dst, label):
+    """Copy src -> dst when content differs (byte-level SHA256). Returns changed(0/1)."""
+    if os.path.exists(dst) and _file_hash(src) == _file_hash(dst):
+        log(f"consistent: {label}")
+        return 0
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(src, "rb") as f:
+        data = f.read()
+    with open(dst, "wb") as f:
+        f.write(data)
+    log(f"synced: {label}")
+    return 1
+
+def _copy_tree_if_diff(src_dir, dst_dir, label):
+    changed = 0
+    for root, dirs, files in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__"]
+        for fname in files:
+            s = os.path.join(root, fname)
+            rel = os.path.relpath(s, src_dir)
+            changed += _copy_if_diff(s, os.path.join(dst_dir, rel), f"{label}/{rel}")
+    return changed
+
+def _codex_cli():
+    """Locate the Codex CLI binary: env override, portable default, then PATH."""
+    env = os.environ.get("CODEX_CLI_PATH")
+    if env and os.path.exists(env):
+        return env
+    for cand in (
+        r"E:\项目\Codex_便携版\OpenAI.Codex\app\resources\codex.exe",
+        r"C:\Users\Administrator\AppData\Local\Programs\OpenAI.Codex\codex.exe",
+    ):
+        if os.path.exists(cand):
+            return cand
+    return "codex"
+
+def _bump_cachebuster(plugin_json):
+    """Bump version to '<prefix>+codex.<UTC timestamp>' (byte-preserving)."""
+    import datetime, re as _re
+    with open(plugin_json, "rb") as f:
+        data = f.read()
+    m = _re.search(rb'"version"\s*:\s*"([^"]+)"', data)
+    if not m:
+        raise RuntimeError(f"No version field in {plugin_json}")
+    ver = m.group(1).decode("utf-8", errors="replace")
+    prefix = ver.split("+")[0] if "+" in ver else ver
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    new_ver = f"{prefix}+codex.{ts}"
+    data = data.replace(m.group(0), b'"version": "' + new_ver.encode() + b'"', 1)
+    with open(plugin_json, "wb") as f:
+        f.write(data)
+    log(f"cachebuster: {ver} -> {new_ver}")
+    return new_ver
+
+def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
+    """Update .agents plugin source from runtime (main), bump cachebuster,
+    then reinstall via `codex plugin add <plugin>@<marketplace>`."""
+    log("=" * 50)
+    log("REINSTALL PLUGIN: runtime -> .agents source -> codex plugin add")
+    log("=" * 50)
+    agents_dir = os.path.abspath(agents_dir)
+    if not os.path.isdir(agents_dir):
+        raise RuntimeError(f"Agents plugin dir not found: {agents_dir}")
+    src_skill = os.path.join(run_dir, "SKILL.md")
+    if not os.path.exists(src_skill):
+        src_skill = os.path.join(run_dir, "skills", "SKILL.md")
+    if os.path.exists(src_skill):
+        _copy_if_diff(src_skill, os.path.join(agents_dir, "skills", plugin, "SKILL.md"), f"skills/{plugin}/SKILL.md")
+    for rel in ("README.md", "AGENTS.md", "LICENSE"):
+        rp = os.path.join(run_dir, rel)
+        if os.path.exists(rp):
+            _copy_if_diff(rp, os.path.join(agents_dir, rel), rel)
+    for d in PLUGIN_ASSET_DIRS:
+        rd = os.path.join(run_dir, d)
+        if os.path.isdir(rd):
+            _copy_tree_if_diff(rd, os.path.join(agents_dir, d), d)
+    ver = _bump_cachebuster(os.path.join(agents_dir, ".codex-plugin", "plugin.json"))
+    cli = _codex_cli()
+    log(f"Reinstalling {plugin}@{marketplace} via {cli} ...")
+    r = subprocess.run([cli, "plugin", "add", f"{plugin}@{marketplace}"],
+                       capture_output=True, timeout=120)
+    out = r.stdout.decode("utf-8", errors="replace")
+    err = r.stderr.decode("utf-8", errors="replace")
+    if r.returncode != 0:
+        raise RuntimeError(f"codex plugin add failed ({r.returncode}): {err.strip() or out.strip()}")
+    log(f"Reinstall OK: {plugin}@{marketplace} -> {ver}")
+    for line in out.splitlines():
+        if line.strip():
+            log(line.strip()[:160])
 
 def assert_edge_running():
     try:
@@ -258,13 +351,12 @@ def cmd_pre_check(owner, repo, repo_dir):
 # PUSH (with auto audit gate)
 # ═══════════════════════════════════════════════════════════════════
 
-def cmd_sync(owner, repo, message, repo_dir, run_dir):
-    """Sync plugin info files from runtime (main) dir into local source repo,
-    then run audit gate + git push in one shot (runtime -> source -> git).
-    Works for any plugin; not tied to a specific runtime.
-    """
+def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=None, marketplace="personal"):
+    """One-shot plugin publish: runtime(main) -> local source repo -> audit gate
+    -> git push -> (optional) .agents source + cachebuster + codex plugin add.
+    Works for any plugin; not tied to a specific runtime."""
     log("=" * 50)
-    log("SYNC PLUGIN INFO: runtime(main) -> local source -> git")
+    log("SYNC PLUGIN: runtime(main) -> local source -> audit -> git" + (" -> reinstall" if agents_dir else ""))
     log("=" * 50)
     run_dir = os.path.abspath(run_dir)
     if not os.path.isdir(run_dir):
@@ -285,12 +377,19 @@ def cmd_sync(owner, repo, message, repo_dir, run_dir):
             f.write(data)
         log(f"synced: {rel} (runtime -> source)")
         changed.append(rel)
+    for d in PLUGIN_ASSET_DIRS:
+        rd = os.path.join(run_dir, d)
+        ld = os.path.join(repo_dir, d)
+        if os.path.isdir(rd):
+            changed += _copy_tree_if_diff(rd, ld, d)
     if not changed:
         log("All plugin info files consistent. No sync needed.")
     else:
         log(f"Sync done: {len(changed)} file(s) updated.")
     log("Running audit gate + push...")
     cmd_push(owner, repo, message, repo_dir)
+    if agents_dir and plugin:
+        cmd_reinstall(agents_dir, plugin, marketplace, run_dir)
 
 def cmd_push(owner, repo, message, repo_dir):
     """Push local changes (auto-runs audit first)."""
@@ -439,6 +538,9 @@ if __name__ == "__main__":
     
     parser.add_argument("--dir", help="Repository directory (default: parent of scripts/)")
     parser.add_argument("--run", help="Runtime (main) directory to sync plugin info from (for 'sync' action)")
+    parser.add_argument("--agents", help=".agents plugin source dir to update + reinstall (for 'sync' action)")
+    parser.add_argument("--plugin", help="Plugin name to reinstall (e.g. diegin), with --agents")
+    parser.add_argument("--marketplace", default="personal", help="Marketplace for reinstall (default: personal)")
     parser.add_argument("--message", default="Update", help="Commit message")
     parser.add_argument("--tag", default="v1.0.0", help="Release tag")
     parser.add_argument("--name", help="Release name (default: same as tag)")
@@ -466,7 +568,7 @@ if __name__ == "__main__":
         cmd_set_topics(args.owner, args.repo, args.topics or ["codex", "codex-skill"])
     elif args.action == "sync":
         if not args.run: parser.error("--run is required for 'sync' action")
-        cmd_sync(args.owner, args.repo, args.message, REPO_DIR, args.run)
+        cmd_sync(args.owner, args.repo, args.message, REPO_DIR, args.run, args.agents, args.plugin, args.marketplace)
     elif args.action == "audit":
         cmd_audit(REPO_DIR)
     elif args.action == "api":
