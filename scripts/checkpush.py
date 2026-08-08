@@ -160,7 +160,7 @@ def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
         src_skill = os.path.join(run_dir, "skills", "SKILL.md")
     if os.path.exists(src_skill):
         _copy_if_diff(src_skill, os.path.join(skill_dir, "SKILL.md"), f"skills/{os.path.basename(skill_dir)}/SKILL.md")
-    for rel in ("README.md", "AGENTS.md", "LICENSE"):
+    for rel in ("README.md", "AGENTS.md", "LICENSE", ".codex-plugin/plugin.json"):
         rp = os.path.join(run_dir, rel)
         if os.path.exists(rp):
             _copy_if_diff(rp, os.path.join(agents_dir, rel), rel)
