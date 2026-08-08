@@ -39,6 +39,16 @@ PLUGIN_INFO_FILES = [
 # [1.2.0] 插件资源目录（存在才同步，递归复制）
 PLUGIN_ASSET_DIRS = ["assets"]
 
+# [1.3.0] 技能资源目录：同步到 .agents/skills/<skill>/ 下（参照系统自带插件结构，
+# 剔除备份/运行状态：.bak/_bak_/.pre_/.err_/_backup_/__pycache__/var/tests）
+PLUGIN_SKILL_DIRS = ["engine", "hooks", "config", "references", "agents"]
+PLUGIN_SKILL_EXTRA = [
+    ("workspace/dgen_rules.md", "workspace/dgen_rules.md"),
+    ("requirements.txt", "requirements.txt"),
+]
+SKILL_DIR_EXCLUDES = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "_test_", "__pycache__", ".pytest_cache")
+SKILL_DIR_EXCLUDED_DIRS = ("var", "workspace", ".git")
+
 # ─── HELPERS ─────────────────────────────────────────────────────────
 
 def log(msg):
@@ -84,11 +94,14 @@ def _copy_if_diff(src, dst, label):
     log(f"synced: {label}")
     return 1
 
-def _copy_tree_if_diff(src_dir, dst_dir, label):
+def _copy_tree_if_diff(src_dir, dst_dir, label, excludes=(), exclude_dirs=()):
     changed = 0
     for root, dirs, files in os.walk(src_dir):
-        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__"]
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__"
+                   and d not in exclude_dirs and not any(pat in d for pat in excludes)]
         for fname in files:
+            if any(pat in fname for pat in excludes):
+                continue
             s = os.path.join(root, fname)
             rel = os.path.relpath(s, src_dir)
             changed += _copy_if_diff(s, os.path.join(dst_dir, rel), f"{label}/{rel}")
@@ -155,6 +168,16 @@ def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
         rd = os.path.join(run_dir, d)
         if os.path.isdir(rd):
             _copy_tree_if_diff(rd, os.path.join(agents_dir, d), d)
+    # [1.3.0] 技能资源目录：参照系统插件 skills/<name>/ 结构（engine/hooks/config/references/agents...）
+    base = os.path.basename(skill_dir)
+    for d in PLUGIN_SKILL_DIRS:
+        rd = os.path.join(run_dir, d)
+        if os.path.isdir(rd):
+            _copy_tree_if_diff(rd, os.path.join(skill_dir, d), f"skills/{base}/{d}", SKILL_DIR_EXCLUDES, SKILL_DIR_EXCLUDED_DIRS)
+    for rel, dst_rel in PLUGIN_SKILL_EXTRA:
+        rp = os.path.join(run_dir, rel)
+        if os.path.exists(rp):
+            _copy_if_diff(rp, os.path.join(skill_dir, dst_rel), f"skills/{base}/{dst_rel}")
     ver = _bump_cachebuster(os.path.join(agents_dir, ".codex-plugin", "plugin.json"))
     cli = _codex_cli()
     log(f"Reinstalling {plugin}@{marketplace} via {cli} ...")

@@ -12,7 +12,7 @@ description: "Check before push. Audit encoding (BOM/mojibake/replacement chars)
 | **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息同步（运行版主 → 本地源码 → 审推 → git 一步到位）。 |
 | **👤 开发者** | linsong-dev |
 | **📂 类别** | Productivity |
-| **🏷️ 版本** | 1.2.0 |
+| **🏷️ 版本** | 1.3.0 |
 | **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
 
 ## 工作流程（两步走）
@@ -84,8 +84,9 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | 4 | 2026-08-07 | `d912916` | 新增 sync 插件信息同步（运行版主→本地源码→审推→git 一步到位）+ 插件信息 1.1.0 |
 | 5 | 2026-08-08 | `610aebe` | sync 一键化：assets 资源同步 + --agents/--plugin 重装（.agents 源→cachebuster→codex plugin add）；参照系统自带插件结构补齐插件包（README/AGENTS/LICENSE/assets）+ 插件信息 1.2.0 |
 | 6 | 2026-08-08 | `932c2c5` | 一键化加固：代理不可用 git push 直连 + 技能目录自适应检测 + utcnow 弃用修复；diegin/mindol 插件包已按系统结构补齐并重装 |
+| 7 | 2026-08-08 | `待填` | 技能资源目录同步（engine/hooks/config/references/agents + dgen_rules.md/requirements.txt）→ 插件包 skills/<name>/ 对齐系统插件结构 + 插件信息 1.3.0 |
 
-> 已发布：1.2.0（`610aebe` + `932c2c5`，2026-08-08）
+> 待推送：1.3.0（技能资源目录同步 + 插件包对齐系统结构）
 
 ## Configuration
 
