@@ -64,7 +64,7 @@ SENSITIVE_PATTERNS = [
     r"gho_[A-Za-z0-9]{20,}",                 # GitHub OAuth
     r"ghs_[A-Za-z0-9]{20,}",
     r"ghr_[A-Za-z0-9]{20,}",
-    r"x-access-token:[^\s@]+@",             # token 注入 URL
+    r"x-access" + r"-token:(?!\[REDACTED\])[^\s@]+@",  # token 注入 URL（拼接防审计自指）
     r"sk-[A-Za-z0-9]{20,}",                  # OpenAI key 形态
     r"AIza[0-9A-Za-z_-]{20,}",               # Google API key 形态
 ]
@@ -702,6 +702,78 @@ def cmd_sanitize(repo_dir, apply=False):
     return len(hits), replaced
 
 
+# [2.2] SCAN-MINDOL: 记忆库敏感扫描（P2 最后保障）
+# 扫描 %CODEX_HOME%\mindol\memory.db 中的 token/凭证类敏感内容。
+# memory.db 是迭进插件的语义记忆库（含对话原文/工具命令抄写），不属于 git 发布范围，
+# 因此 audit 管不到它——本命令作为独立最后保障，供审推流程收尾时人工调用。
+def cmd_scan_mindol(db_path="", apply=False):
+    """Scan Mindol memory.db for sensitive tokens/credentials. Returns (hits, applied)."""
+    import sqlite3, re as _re
+    # 记忆库只阻断 token/凭证类（路径在本机记忆库属正常语义上下文，且 P1 决策保留路径）；
+    # 路径类敏感由 audit（git 发布范围）负责，不属于 memory.db 最后保障范围。
+    TOKEN_ONLY = [p for p in SENSITIVE_PATTERNS
+                  if not p.startswith(r"C:\\Users\\") and not p.startswith("E:\\")]
+    if not db_path:
+        _home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+        db_path = os.path.join(_home, "mindol", "memory.db")
+    if not os.path.exists(db_path):
+        print(f"[gh-publish] memory.db not found: {db_path}")
+        print("  >>> ALL CLEAN. Ready to push. (no memory.db) <<<")
+        return 0, 0
+    try:
+        db = sqlite3.connect(db_path)
+        rows = db.execute("SELECT uid, space, text FROM memory_units").fetchall()
+        db.close()
+    except Exception as e:
+        print(f"[gh-publish] ERROR reading memory.db: {e}")
+        return -1, 0
+    hits = []
+    for uid, space, text in rows:
+        text = text or ""
+        for pat in TOKEN_ONLY:
+            if _re.search(pat, text, _re.IGNORECASE):
+                hits.append((uid, space, pat, text[:120]))
+                break
+    if not hits:
+        print(f"  [OK] memory.db 敏感扫描: 0 命中 ({os.path.basename(db_path)})")
+        print("  >>> ALL CLEAN. Ready to push. <<<")
+        return 0, 0
+    print(f"  [!!] memory.db 敏感扫描: {len(hits)} 命中 ({os.path.basename(db_path)})")
+    for uid, space, pat, snippet in hits:
+        print(f"    {space} | {uid} | 模式 {pat!r}")
+        print(f"      {snippet}")
+    applied = 0
+    if apply:
+        try:
+            # 语义重写（保留向量一致性）：复用 Mindol 核心 add_unit 覆盖写
+            _syspath = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..")
+            os.environ.setdefault("CODEX_HOME", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            sys.path.insert(0, os.path.join(os.environ["CODEX_HOME"], "diegin", "engine"))
+            from mindol import core as _mcore
+            from mindol.diegin_integration import sanitize_text as _st
+            m = _mcore.Mindol(storage_path=os.path.dirname(db_path), persist=True)
+            for uid, space, pat, snippet in hits:
+                for sn, sp in m._spaces.items():
+                    for u in sp.memory_units:
+                        if u.uid == uid:
+                            new_text = _st(u.text)
+                            if new_text != u.text:
+                                m.add_unit(text=new_text, source=u.source, uid=uid, space=space,
+                                           path=u.path, metadata=u.metadata)
+                                applied += 1
+                            break
+            m.save()
+            m.close()
+            print(f"  [OK] 已脱敏 {applied} 条（保留向量一致性）")
+            print("  >>> 重跑 scan-mindol 确认 0 命中 <<<")
+        except Exception as e:
+            print(f"  [WARN] --apply 自动脱敏不可用: {e}")
+            print("  >>> 请使用迭进引擎清洗脚本，或手动处理上述命中 <<<")
+    else:
+        print("  >>> 如需自动脱敏请加 --apply（会重写 memory.db 内容） <<<")
+    return len(hits), applied
+
+
 # [2.1] VERIFY: 自动检测并运行测试/自检（发布前验证）
 def cmd_verify(repo_dir, skip_tests=False, pytest_args=None):
     """Detect test entrypoints (pytest/self-check) and run them.
@@ -1048,12 +1120,13 @@ def ensure_token(cdp):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="GitHub Publish Automation")
-    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize", "verify"],
+    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize", "verify", "scan-mindol"],
                        help="Action: pre-check (audit only, no push) | push (auto audit + push) | ...")
     parser.add_argument("--owner", required=False, help="GitHub owner (e.g. linsong-dev)")
     parser.add_argument("--repo", required=False, help="Repository name")
     
     parser.add_argument("--dir", help="Repository directory (default: parent of scripts/)")
+    parser.add_argument("--db", help="Mindol memory.db path (scan-mindol; default: $CODEX_HOME/mindol/memory.db)")
     parser.add_argument("--run", help="Runtime (main) directory to sync plugin info from (for 'sync' action)")
     parser.add_argument("--agents", help=".agents plugin source dir to update + reinstall (for 'sync' action)")
     parser.add_argument("--plugin", help="Plugin name to reinstall (e.g. diegin), with --agents")
@@ -1098,6 +1171,9 @@ if __name__ == "__main__":
         cmd_audit(REPO_DIR)
     elif args.action == "sanitize":
         cmd_sanitize(REPO_DIR, apply=args.apply)
+    elif args.action == "scan-mindol":
+        hits, applied = cmd_scan_mindol(db_path=args.db or "", apply=args.apply)
+        sys.exit(0 if hits == 0 else 1)
     elif args.action == "api":
         token = read_token()
         if not token: raise RuntimeError("No token. Run login first.")
