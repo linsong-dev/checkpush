@@ -1,6 +1,6 @@
 ---
 name: checkpush
-description: "Check before push. Five-stage flow: audit (encoding + sensitive info + git hygiene) -> sanitize (personal-path scrubbing) -> verify (tests) -> push (gated) -> review (remote sync check). Workflows: pre-check, push, sync, audit, sanitize."
+description: "Check before push. Five-stage flow: audit (encoding + syntax + sensitive info + git hygiene + line-ending) -> sanitize (personal-path scrubbing with auto-backup) -> verify (auto pytest/self-check) -> push (gated, divergence check) -> review (remote sync). Workflows: pre-check, push, sync, audit, sanitize, verify."
 ---
 
 # 审推·CheckPush
@@ -12,7 +12,7 @@ description: "Check before push. Five-stage flow: audit (encoding + sensitive in
 | **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息一键同步（运行版主 → 本地源码 → 审推 → git → 可选重装，含插件显示信息 + 技能资源目录）。 |
 | **👤 开发者** | linsong-dev |
 | **📂 类别** | Productivity |
-| **🏷️ 版本** | 2.0.0 |
+| **🏷️ 版本** | 2.1.0 |
 | **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
 
 ## 工作流程（四命令：pre-check / push / sync / audit）
@@ -76,7 +76,8 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | `login` | Edge CDP 浏览器登录 GitHub 获取 token |
 | `release` | 创建 Release |
 | `topics` | 设置仓库话题 |
-| `audit` | 单独跑编码审计（含敏感信息 + git 卫生） |
+| `audit` | 单独跑编码/语法/敏感信息/git 卫生/行尾审计 |
+| `verify` | 发布前验证：自动检测并运行 pytest + 自检脚本（`--skip-tests` 跳过） |
 | `sanitize` | 敏感信息脱敏：预览（默认）或 `--apply` 替换个人路径为占位符 |
 | `sync` | 插件信息一键同步：运行版主 → 本地源码 → 审推 → git → 可选重装 |
 
@@ -93,7 +94,8 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | 7 | 2026-08-08 | `9c02103` | 技能资源目录同步（engine/hooks/config/references/agents + dgen_rules.md/requirements.txt）→ 插件包 skills/<name>/ 对齐系统插件结构 + 插件信息 1.3.0 |
 | 8 | 2026-08-08 | `79bbb4d` | 修复重装不同步 plugin.json 的 bug（插件自述原则顺序守三+攻七→攻七+守三）→ .agents/缓存全链路一致；规则 JSON 乱码修复；token 失效经 git credential fill 恢复 + 插件信息 1.4.0 |
 | 9 | 2026-08-08 | `5e8e27c` | 整理归纳审推工作流
-| 10 | 2026-08-08 | 本次 | v2.0 五段式流程升级：audit 增加敏感信息/个人路径/token/密钥文件/git卫生/历史泄露检查；新增 sanitize 脱敏命令（预览+--apply）；push 后远端同步验证；checkpush.py 自身去除个人路径硬编码；配套文档《审推通用流程_v2.0.md》 |（四命令 pre-check/push/sync/audit + 技能资源同步 + 重装流程 + 执行内存表回填）+ plugin 描述同步 1.4.0 |
+| 10 | 2026-08-08 | 本次 | v2.0 五段式流程升级
+| 11 | 2026-08-09 | 本次 | v2.1 流程完善：audit 增 JSON/YAML/TOML 语法校验与 CRLF/LF 混用检查；新增 verify 命令（自动 pytest+自检）；push 增分叉检测/变更摘要/直连 fetch；sanitize 增自动备份与 token 手动删除提示；退出码规范化（0=通过 1=失败） |：audit 增加敏感信息/个人路径/token/密钥文件/git卫生/历史泄露检查；新增 sanitize 脱敏命令（预览+--apply）；push 后远端同步验证；checkpush.py 自身去除个人路径硬编码；配套文档《审推通用流程_v2.0.md》 |（四命令 pre-check/push/sync/audit + 技能资源同步 + 重装流程 + 执行内存表回填）+ plugin 描述同步 1.4.0 |
 
 > 已发布：1.4.0（`79bbb4d` + `5e8e27c`，2026-08-08）
 

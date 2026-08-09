@@ -337,6 +337,78 @@ def _git_ignored(repo_dir, rel_path):
     except Exception:
         return False
 
+def _scan_syntax(repo_dir):
+    """[2.1] 结构化文件语法校验（JSON/YAML/TOML）。
+    返回 (issues, warns)。配置类文件写坏会直接阻断（SYNTAX 阻断）。"""
+    issues, warns = [], []
+    JSON_EXTS = {".json", ".jsonl"}
+    YAML_EXTS = {".yaml", ".yml"}
+    TOML_EXTS = {".toml"}
+    try:
+        import tomllib  # py3.11+
+    except Exception:
+        tomllib = None
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__" and d != ".git"]
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, repo_dir).replace(os.sep, "/")
+            if _git_ignored(repo_dir, rel):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            try:
+                with open(fpath, "r", encoding="utf-8-sig") as fh:
+                    text = fh.read()
+            except Exception:
+                continue
+            if not text.strip():
+                continue
+            if ext in JSON_EXTS:
+                try:
+                    json.loads(text)
+                except Exception as e:
+                    issues.append((rel, "SYNTAX", f"invalid JSON: {str(e)[:60]}"))
+            elif ext in YAML_EXTS:
+                try:
+                    import yaml
+                    list(yaml.safe_load_all(text))
+                except ImportError:
+                    pass  # 无 yaml 库则跳过（不阻断）
+                except Exception as e:
+                    issues.append((rel, "SYNTAX", f"invalid YAML: {str(e)[:60]}"))
+            elif ext in TOML_EXTS and tomllib is not None:
+                try:
+                    tomllib.loads(text)
+                except Exception as e:
+                    issues.append((rel, "SYNTAX", f"invalid TOML: {str(e)[:60]}"))
+    return issues, warns
+
+
+def _scan_line_endings(repo_dir):
+    """[2.1] 行尾一致性检查（warn 级）：同一文件混用 CRLF/LF 易致跨平台 diff 噪音。"""
+    issues, warns = [], []
+    BIN_HINTS = (b"\x00",)
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__" and d != ".git"]
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, repo_dir).replace(os.sep, "/")
+            if _git_ignored(repo_dir, rel):
+                continue
+            try:
+                with open(fpath, "rb") as fh:
+                    raw = fh.read()
+            except Exception:
+                continue
+            if not raw or raw[:1] == b"\x00":
+                continue  # 空/疑似二进制跳过
+            crlf = raw.count(b"\r\n")
+            lf_only = raw.count(b"\n") - crlf
+            if crlf > 0 and lf_only > 0:
+                warns.append((rel, "LINE-ENDING", f"mixed CRLF({crlf})/LF({lf_only})"))
+    return issues, warns
+
+
 def _fnmatch_base(fname, pat):
     """基名匹配：支持 * 通配；匹配成功返回 True"""
     import fnmatch
@@ -500,6 +572,11 @@ def cmd_audit(repo_dir):
     git_issues, git_warns = _scan_git_health(repo_dir)
     issues += sens_issues + git_issues
     warns = sens_warns + git_warns
+    # [2.1] 结构化文件语法校验 + 行尾一致性（并入总门禁）
+    syn_issues, syn_warns = _scan_syntax(repo_dir)
+    eol_issues, eol_warns = _scan_line_endings(repo_dir)
+    issues += syn_issues + eol_issues
+    warns += syn_warns + eol_warns
 
     print(); print("=" * 60)
     print(f"  AUDIT: {repo_dir}")
@@ -509,13 +586,17 @@ def cmd_audit(repo_dir):
         print(); print(f"  {'FILE':50s} {'TYPE':15s} DETAIL"); print(f"  {'-'*48} {'-'*15} {'-'*40}")
         for rel, typ, detail in issues:
             print(f"  [!] {rel[:48]:48s} {typ:15s} {detail[:60]}")
-        print(f"  >>> {len(issues)} issue(s) found (BLOCKING). Fix before push. <<<")
-    elif warns:
-        print(f"  >>> {len(warns)} warning(s) (non-blocking, review). <<<")
+    if warns:
+        if issues:
+            print()
+        print(f"  {len(warns)} warning(s) (non-blocking, review):")
         for rel, typ, detail in warns[:20]:
             print(f"  [~] {rel[:48]:48s} {typ:15s} {detail[:60]}")
         if len(warns) > 20:
             print(f"  ... and {len(warns)-20} more warning(s)")
+    print()
+    if issues:
+        print(f"  >>> {len(issues)} issue(s) found (BLOCKING). Fix before push. <<<")
     else:
         print(f"  >>> ALL CLEAN. Ready to push. <<<")
     return ok, issues
@@ -526,9 +607,18 @@ def cmd_sanitize(repo_dir, apply=False):
     --apply 实际替换；不带 --apply 只列出命中行（安全预览）。
     return: (hit_count, replaced_count)"""
     hits, replaced = [], 0
+    manual_tokens = []  # [2.1] token 类命中：不可自动替换，必须手动删除
     TEXT_EXTS = {".py",".md",".json",".txt",".ps1",".toml",".yaml",".yml",".ini",".cfg",".conf",".js",".ts",".html",".css",".xml",".bat",".cmd",".sh",".env",".gitignore"}
     # 字面路径使用 re.escape：避免 \项 等无效转义，且防止路径中的正则元字符误匹配
     pairs = [(re.compile(re.escape(pat), re.IGNORECASE), repl) for pat, repl in SENSITIVE_MAP]
+    # [2.1] token 形态正则（ghp_/github_pat_/gho_/sk- 等）：自动替换无效，需人工删除
+    token_rxs = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_PATTERNS if "Users" not in p and "项目" not in p]
+    if apply:
+        import datetime as _dt
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        _bakdir = os.path.join(repo_dir, f".sanitize_backup_{_ts}")
+        os.makedirs(_bakdir, exist_ok=True)
+        log(f"Backup dir (pre-replace): {_bakdir}")
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__" and d != ".git"]
         for fname in files:
@@ -570,7 +660,23 @@ def cmd_sanitize(repo_dir, apply=False):
                             lines[i] = rx.sub(repl, line)
                             changed = True
                         break
+                else:
+                    # [2.1] token 形态：仅提示，不自动改（改了也会被 audit 拦）
+                    if any(tx.search(line) for tx in token_rxs):
+                        if not any(rel == m[0] and i + 1 == m[1] for m in manual_tokens):
+                            manual_tokens.append((rel, i + 1, "TOKEN"))
             if changed:
+                # [2.1] 备份原文件（仅首次）
+                if apply:
+                    _src_bak = os.path.join(_bakdir, rel.replace("/", os.sep).replace(os.sep, "__"))
+                    os.makedirs(os.path.dirname(_src_bak), exist_ok=True)
+                    try:
+                        with open(fpath, "rb") as _f0:
+                            _orig = _f0.read()
+                        with open(_src_bak, "wb") as _f1:
+                            _f1.write(_orig)
+                    except Exception:
+                        pass
                 with open(fpath, "w", encoding="utf-8", newline="\n") as fh:
                     fh.writelines(lines)
                 replaced += 1
@@ -582,11 +688,113 @@ def cmd_sanitize(repo_dir, apply=False):
         print(f"  [~] {rel}:L{lineno} ~{pat}~")
     if len(hits) > 50:
         print(f"  ... and {len(hits)-50} more")
+    if manual_tokens:
+        print(); print("  [!!] TOKEN-like content found - these CANNOT be auto-replaced, delete manually:")
+        for rel, lineno, _t in manual_tokens[:20]:
+            print(f"  [!] {rel}:L{lineno} (token/secret)")
+        if len(manual_tokens) > 20:
+            print(f"  ... and {len(manual_tokens)-20} more")
+        print("  >>> Also revoke any exposed token on GitHub before publishing. <<<")
     if apply:
         print("  >>> Done. Run pre-check to confirm ALL CLEAN. <<<")
     else:
         print("  >>> Preview only. Re-run with --apply to replace. <<<")
     return len(hits), replaced
+
+
+# [2.1] VERIFY: 自动检测并运行测试/自检（发布前验证）
+def cmd_verify(repo_dir, skip_tests=False, pytest_args=None):
+    """Detect test entrypoints (pytest/self-check) and run them.
+    Returns True if all passed. Non-blocking warnings if no tests found."""
+    log("=" * 50)
+    log("VERIFY: test/self-check gate")
+    log("=" * 50)
+    passed, warns = True, []
+    candidates = []
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "_")) and d != "__pycache__" and d != ".git"]
+        relroot = os.path.relpath(root, repo_dir)
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), repo_dir).replace(os.sep, "/")
+            low = fname.lower()
+            if low.startswith("test_") and low.endswith(".py"):
+                candidates.append(("pytest", rel))
+            elif low.endswith(".py") and ("selfcheck" in low or "self_check" in low):
+                candidates.append(("selfcheck", rel))
+    # 去重：只保留测试根
+    pytest_files = sorted({r for kind, r in candidates if kind == "pytest"})
+    selfchecks = sorted({r for kind, r in candidates if kind == "selfcheck"})
+    tests_root = None
+    for root, dirs, files in os.walk(repo_dir):
+        if "tests" in dirs:
+            tests_root = os.path.join(root, "tests")
+            break
+    if tests_root is None and any(f.startswith("test_") and f.endswith(".py") for f in os.listdir(repo_dir)):
+        tests_root = repo_dir
+    if skip_tests:
+        log("Tests skipped by user (--skip-tests).")
+    elif tests_root is not None or pytest_files:
+        tgt = tests_root or repo_dir
+        cmd = [sys.executable, "-m", "pytest", tgt, "-q", "-p", "no:cacheprovider"]
+        if pytest_args:
+            cmd += pytest_args.split()
+        log(f"Running: {' '.join(cmd)}")
+        import tempfile
+        _fd, _outp = tempfile.mkstemp(suffix=".txt")
+        try:
+            with os.fdopen(_fd, "wb") as _of:
+                r = subprocess.run(cmd, cwd=repo_dir, stdout=_of, stderr=subprocess.STDOUT, timeout=900)
+            with open(_outp, "r", encoding="utf-8", errors="replace") as _rf:
+                _full = _rf.read()
+            tail = _full.strip().splitlines()[-8:]
+            for line in tail:
+                log(line.strip()[:160])
+            if r.returncode != 0:
+                passed = False
+                log(f"FAILED: pytest exit {r.returncode}")
+            else:
+                log("PASSED: pytest")
+        except FileNotFoundError:
+            warns.append(("pytest", "pytest not installed - skipped (not blocking)"))
+        except subprocess.TimeoutExpired:
+            passed = False
+            log("FAILED: pytest timeout (>900s)")
+        finally:
+            try:
+                os.remove(_outp)
+            except Exception:
+                pass
+    else:
+        warns.append(("tests", "no test files detected - skipped (not blocking)"))
+
+    for sc in selfchecks:
+        log(f"Running self-check: {sc}")
+        try:
+            sc_path = os.path.join(repo_dir, sc.replace("/", os.sep))
+            r = subprocess.run([sys.executable, sc_path], cwd=os.path.dirname(sc_path), capture_output=True, timeout=300)
+            out = r.stdout.decode("utf-8", errors="replace")
+            tail = out.strip().splitlines()[-4:]
+            for line in tail:
+                log(line.strip()[:160])
+            if r.returncode != 0:
+                # [2.1] self-check 常绑定运行时环境（状态文件/证据库），源码库中失败记为警告，不阻断发布
+                warns.append(("selfcheck", f"{sc} exit {r.returncode} (may need runtime env)"))
+            else:
+                log(f"PASSED: {sc}")
+        except Exception as e:
+            log(f"self-check skipped: {e}")
+
+    print()
+    print("=" * 60)
+    if passed:
+        print(f"  VERIFY: PASSED")
+        for w in warns:
+            print(f"  [~] {w[0]}: {w[1]}")
+        print("=" * 60)
+        return True
+    print(f"  VERIFY: FAILED - do not push until fixed.")
+    print("=" * 60)
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -658,7 +866,7 @@ def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=No
 def cmd_push(owner, repo, message, repo_dir):
     """Push local changes (auto-runs audit first)."""
     log("=" * 50)
-    log("STEP 1/3: Audit")
+    log("STEP 1/4: Audit")
     log("=" * 50)
     _, issues = cmd_audit(repo_dir)
     if issues:
@@ -676,7 +884,7 @@ def cmd_push(owner, repo, message, repo_dir):
         raise RuntimeError("No token. Run login first.")
 
     log("=" * 50)
-    log("STEP 2/3: Verify repo")
+    log("STEP 2/4: Verify repo")
     log("=" * 50)
     log(f"Verifying repo: {owner}/{repo}")
     status, data = api_call("GET", f"/repos/{owner}/{repo}", token=token)
@@ -684,11 +892,35 @@ def cmd_push(owner, repo, message, repo_dir):
         raise RuntimeError(f"Repository {owner}/{repo} not found (HTTP {status})")
     log(f"Repo exists. Branch: {data.get('default_branch', 'main')}")
 
+    # [2.1] 推送前分叉检测：本地与远端 diverged（behind>0）时警告，防覆盖远端新提交
+    try:
+        rcD, outD, _ = _run_git(["git", "rev-list", "--count", "--left-right", "@{u}...HEAD"], repo_dir)
+        if rcD == 0 and outD.strip():
+            left, _, right = outD.strip().partition("\t")
+            behind = int(left or 0); ahead = int(right or 0)
+            if behind > 0:
+                log(f"WARNING: local is {behind} commit(s) BEHIND remote - push may need force or pull first.")
+            else:
+                log(f"sync check: behind={behind} ahead={ahead}")
+    except Exception:
+        pass
+
+    # [2.1] 变更摘要：展示将要提交的内容
     log("=" * 50)
-    log("STEP 3/3: Git push")
+    log("STEP 3/4: Git push")
     log("=" * 50)
     log(f"Directory: {repo_dir}")
     log(f"Message: {message}")
+    rcS, outS, _ = _run_git(["git", "status", "--porcelain"], repo_dir)
+    changes = [ln for ln in outS.splitlines() if ln.strip()]
+    if changes:
+        log(f"Changes to commit: {len(changes)} file(s)")
+        for ln in changes[:15]:
+            log(f"  {ln.strip()[:100]}")
+        if len(changes) > 15:
+            log(f"  ... and {len(changes)-15} more")
+    else:
+        log("No changes detected - nothing to push.")
 
     rc, out, err = _run_git(["git", "add", "-A"], repo_dir)
     if rc != 0: log(f"git add stderr: {err.strip()}")
@@ -738,9 +970,14 @@ def cmd_push(owner, repo, message, repo_dir):
     log("STEP 4/4: Verify remote sync")
     log("=" * 50)
     try:
-        _run_git(["git", "fetch", "origin"], repo_dir)
+        fetch_cmd = ["git", "fetch", "origin"]
+        if not _proxy_ok():
+            fetch_cmd = ["git", "-c", "http.proxy=", "-c", "https.proxy=", "fetch", "origin"]
+        _run_git(fetch_cmd, repo_dir)
         rc4, out4, _ = _run_git(["git", "rev-list", "--count", "--left-right", f"origin/{branch}...HEAD"], repo_dir)
         log(f"remote vs local: {out4.strip()}  (left=behind right=ahead; '0\t0' = synced)")
+        if rc4 != 0 or (out4.strip() and out4.strip().replace("\t", " ") != "0 0"):
+            log("NOTE: remote not fully synced - check the counts above.")
     except Exception as e:
         log(f"verify skipped: {e}")
     log("Push successful.")
@@ -811,7 +1048,7 @@ def ensure_token(cdp):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="GitHub Publish Automation")
-    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize"],
+    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize", "verify"],
                        help="Action: pre-check (audit only, no push) | push (auto audit + push) | ...")
     parser.add_argument("--owner", required=False, help="GitHub owner (e.g. linsong-dev)")
     parser.add_argument("--repo", required=False, help="Repository name")
@@ -827,6 +1064,8 @@ if __name__ == "__main__":
     parser.add_argument("--body", default="", help="Release body/notes")
     parser.add_argument("--prerelease", action="store_true", help="Mark as prerelease")
     parser.add_argument("--apply", action="store_true", help="sanitize: actually replace (default: preview only)")
+    parser.add_argument("--skip-tests", action="store_true", help="verify: skip pytest (only self-check)")
+    parser.add_argument("--pytest-args", default="", help="verify: extra args passed to pytest (e.g. '-k test_rule')")
     parser.add_argument("--topics", nargs="+", help="Repository topics")
     parser.add_argument("--method", help="HTTP method for API call")
     parser.add_argument("--path", help="API path for API call")
@@ -838,11 +1077,16 @@ if __name__ == "__main__":
         parser.error(f"--owner and --repo are required for '{args.action}' action")
 
     if args.action == "pre-check":
-        cmd_pre_check(args.owner, args.repo, REPO_DIR)
+        ok = cmd_pre_check(args.owner, args.repo, REPO_DIR)
+        sys.exit(0 if ok else 1)
+    elif args.action == "verify":
+        ok = cmd_verify(REPO_DIR, skip_tests=args.skip_tests, pytest_args=args.pytest_args)
+        sys.exit(0 if ok else 1)
     elif args.action == "login":
         cmd_login()
     elif args.action == "push":
         cmd_push(args.owner, args.repo, args.message, REPO_DIR)
+        sys.exit(0)
     elif args.action == "release":
         cmd_release(args.owner, args.repo, args.tag, args.name or args.tag, args.body, args.prerelease)
     elif args.action == "topics":
