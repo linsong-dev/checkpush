@@ -48,6 +48,8 @@ PLUGIN_SKILL_EXTRA = [
 ]
 SKILL_DIR_EXCLUDES = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "_test_", "__pycache__", ".pytest_cache")
 SKILL_DIR_EXCLUDED_DIRS = ("var", "workspace", ".git")
+# [2.0] 用户级/本机配置文件：sync/reinstall 不传播（含个人绝对路径，公开仓库禁用）
+PLUGIN_SKILL_CONFIG_EXCLUDES = ("config.toml", "hooks.json")
 
 # ─── [2.0] 敏感信息审计配置 ─────────────────────────────────────────
 # SENSITIVE_PATTERNS: 命中即阻断的敏感内容（正则，大小写不敏感）
@@ -212,7 +214,8 @@ def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
     for d in PLUGIN_SKILL_DIRS:
         rd = os.path.join(run_dir, d)
         if os.path.isdir(rd):
-            _copy_tree_if_diff(rd, os.path.join(skill_dir, d), f"skills/{base}/{d}", SKILL_DIR_EXCLUDES, SKILL_DIR_EXCLUDED_DIRS)
+            ex = SKILL_DIR_EXCLUDES + (PLUGIN_SKILL_CONFIG_EXCLUDES if d == "config" else ())
+            _copy_tree_if_diff(rd, os.path.join(skill_dir, d), f"skills/{base}/{d}", ex, SKILL_DIR_EXCLUDED_DIRS)
     for rel, dst_rel in PLUGIN_SKILL_EXTRA:
         rp = os.path.join(run_dir, rel)
         if os.path.exists(rp):
@@ -418,8 +421,10 @@ def _scan_git_health(repo_dir):
     issues, warns = [], []
     rc, out, _ = _run_git(["git", "ls-files"], repo_dir)
     tracked = out.splitlines() if rc == 0 else []
-    BAK_PATS = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "_test_", "__pycache__", ".pytest_cache")
+    BAK_PATS = (".bak", "_bak_", ".pre_", ".err_", "_backup_", "__pycache__", ".pytest_cache")
     for rel in tracked:
+        if rel.startswith("tests/"):
+            continue  # 测试夹具（_test_dash/_test_war）是设计使然的固定数据，豁免
         low = rel.lower()
         if any(p in low for p in BAK_PATS):
             warns.append((rel, "GIT-BACKUP", "tracked backup/residue file"))
