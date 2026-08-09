@@ -1,6 +1,6 @@
 ---
 name: checkpush
-description: "Check before push. Five-stage flow: audit (encoding + syntax + sensitive info + git hygiene + line-ending) -> sanitize (personal-path scrubbing with auto-backup) -> verify (auto pytest/self-check) -> push (gated, divergence check) -> review (remote sync). Workflows: pre-check, push, sync, audit, sanitize, verify."
+description: "Check before push. Five-stage flow: audit (encoding + syntax + sensitive info + git hygiene + line-ending) -> sanitize (personal-path scrubbing with auto-backup) -> verify (auto pytest/self-check) -> push (gated, divergence check) -> review (remote sync). Last-resort guard: scan-mindol (memory.db sensitive scan). Workflows: pre-check, push, sync, audit, sanitize, verify, scan-mindol."
 ---
 
 # 审推·CheckPush
@@ -12,7 +12,7 @@ description: "Check before push. Five-stage flow: audit (encoding + syntax + sen
 | **🔧 功能** | 自动化发布/更新 Codex 技能仓库到 GitHub。推送前编码预检门禁：先审后推，有问题退回，通过才推。支持插件信息一键同步（运行版主 → 本地源码 → 审推 → git → 可选重装，含插件显示信息 + 技能资源目录）。 |
 | **👤 开发者** | linsong-dev |
 | **📂 类别** | Productivity |
-| **🏷️ 版本** | 2.1.0 |
+| **🏷️ 版本** | 2.2.0 |
 | **🌐 网站** | [github.com/linsong-dev/checkpush](https://github.com/linsong-dev/checkpush) |
 
 ## 工作流程（四命令：pre-check / push / sync / audit）
@@ -80,6 +80,7 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | `verify` | 发布前验证：自动检测并运行 pytest + 自检脚本（`--skip-tests` 跳过） |
 | `sanitize` | 敏感信息脱敏：预览（默认）或 `--apply` 替换个人路径为占位符 |
 | `sync` | 插件信息一键同步：运行版主 → 本地源码 → 审推 → git → 可选重装 |
+| `scan-mindol` | 记忆库敏感扫描（最后保障）：扫 `%CODEX_HOME%\mindol\memory.db` token/凭证，`--apply` 自动脱敏 |
 
 ## 已执行的工作
 
@@ -96,8 +97,9 @@ python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xx
 | 9 | 2026-08-08 | `5e8e27c` | 整理归纳审推工作流
 | 10 | 2026-08-08 | 本次 | v2.0 五段式流程升级
 | 11 | 2026-08-09 | 本次 | v2.1 流程完善：audit 增 JSON/YAML/TOML 语法校验与 CRLF/LF 混用检查；新增 verify 命令（自动 pytest+自检）；push 增分叉检测/变更摘要/直连 fetch；sanitize 增自动备份与 token 手动删除提示；退出码规范化（0=通过 1=失败） |：audit 增加敏感信息/个人路径/token/密钥文件/git卫生/历史泄露检查；新增 sanitize 脱敏命令（预览+--apply）；push 后远端同步验证；checkpush.py 自身去除个人路径硬编码；配套文档《审推通用流程_v2.0.md》 |（四命令 pre-check/push/sync/audit + 技能资源同步 + 重装流程 + 执行内存表回填）+ plugin 描述同步 1.4.0 |
+| 12 | 2026-08-09 | `f570aee` | v2.2 最后保障：新增 scan-mindol 命令（memory.db 敏感扫描 + --apply 脱敏）；x-access-token 正则自指修复；配套文档《审推通用流程_v2.0.md》§8.5 + §8.6 交付记录；插件信息 2.2.0 |
 
-> 已发布：1.4.0（`79bbb4d` + `5e8e27c`，2026-08-08）
+> 已发布：2.2.0（`f570aee`，2026-08-09）
 
 ## Configuration
 
