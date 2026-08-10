@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/linsong-dev/checkpush/blob/main/LICENSE">
+  [![EN](https://img.shields.io/badge/EN-README-blue)](README.en.md) | [![中文](https://img.shields.io/badge/中文-README-red)](README.md) | <a href="https://github.com/linsong-dev/checkpush/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
   </a>
   <img src="https://img.shields.io/badge/version-2.2.0-brightgreen" alt="Version">
