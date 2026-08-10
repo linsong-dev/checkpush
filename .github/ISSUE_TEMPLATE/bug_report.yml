@@ -1,0 +1,45 @@
+name: Bug 报告
+description: 报告 checkpush 审推流程异常（audit 漏报/误报、push 失败等）
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: "2.2.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: Python / git / 操作系统
+      placeholder: "Python 3.12 · git 2.4x · Windows 11"
+  - type: dropdown
+    id: action
+    attributes:
+      label: 涉及的子命令
+      options:
+        - audit
+        - sanitize
+        - verify
+        - push
+        - sync
+        - topics
+        - release
+        - scan-mindol
+        - 其他
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 命令、报错输出、期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: 关键输出（脱敏后）
+      description: 报错堆栈 / 审计输出（请勿贴 token 或真实路径）
+      render: text

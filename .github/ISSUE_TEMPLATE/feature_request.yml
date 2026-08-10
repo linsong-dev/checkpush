@@ -1,0 +1,17 @@
+name: 功能建议
+description: 建议新的审计项 / 命令 / 门禁规则
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 当前流程漏掉了什么风险？
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议方案
+      description: 新审计项 / 新命令 / 配置项设想
