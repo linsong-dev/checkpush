@@ -9,7 +9,7 @@
   [![EN](https://img.shields.io/badge/EN-README-blue)](README.en.md) | [![中文](https://img.shields.io/badge/中文-README-red)](README.md) | <a href="https://github.com/linsong-dev/checkpush/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
   </a>
-  <img src="https://img.shields.io/badge/version-2.2.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.3.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/python-3.10+-orange" alt="Python">
 </p>
 
@@ -33,6 +33,7 @@
 - **自动验证**：`verify` 自动运行 pytest + 自检脚本，退出码 0/1
 - **门禁推送**：push 自动跑审计门禁 + 分叉检测 + 变更摘要 + push 后直连 fetch 验证
 - **插件信息一键同步**：`sync` 把运行版主目录的 SKILL.md / README / LICENSE / plugin.json / assets 同步到源码库并推送
+- **一键全环节**：`all` 一条命令完成「运行版验证 → 数据回灌 → 门面同步 → 版本核对 → 源码库验证 → 审计 → 推送 → 重装 → scan-mindol → trail 记录」
 - **最后保障**：`scan-mindol` 扫描记忆库（memory.db）无 token/凭证残留
 
 ## 环境要求
@@ -64,7 +65,10 @@ python scripts/checkpush.py push --owner linsong-dev --repo my-skill --dir S:\xx
 # 3. 插件信息一键同步（运行版主 → 源码库 → git，可选 --agents + --plugin 重装插件）
 python scripts/checkpush.py sync --owner linsong-dev --repo my-skill --dir S:\xxx\my-skill --run E:\xxx\my-skill --message "sync plugin info"
 
-# 4. 单独审计 / 脱敏预览 / 验证
+# 4. 一键全环节（开发完成后的全部同步，一条命令）
+python scripts/checkpush.py all --owner linsong-dev --repo my-skill --dir S:\xxx\my-skill --run E:\xxx\my-skill --agents C:\Users\<user>\.agents\plugins\my-skill --plugin my-skill --trail E:\xxx\待办与断点.md --message "update"
+
+# 5. 单独审计 / 脱敏预览 / 验证
 python scripts/checkpush.py audit --dir S:\xxx\my-skill
 python scripts/checkpush.py sanitize --dir S:\xxx\my-skill          # 预览
 python scripts/checkpush.py sanitize --dir S:\xxx\my-skill --apply  # 实际替换
@@ -86,6 +90,9 @@ verify（pytest + 自检）
 push（门禁 + 分叉检测 + 变更摘要）
    ↓
 review（远端同步核验 0/0）
+
+一键全环节 `all`：runtime verify → 数据回灌 → 门面同步 → 版本核对
+  → 源码库 verify → audit 门禁 → push → 重装 → scan-mindol → trail
 ```
 
 ## 项目结构

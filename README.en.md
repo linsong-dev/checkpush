@@ -10,7 +10,7 @@
   <a href="https://github.com/linsong-dev/checkpush/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
   </a>
-  <img src="https://img.shields.io/badge/version-2.2.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.3.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/python-3.10+-orange" alt="Python">
 </p>
 

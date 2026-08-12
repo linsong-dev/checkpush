@@ -161,8 +161,10 @@ def _codex_cli():
     return "codex"  # 兜底：交给 PATH 解析
     return "codex"
 
-def _bump_cachebuster(plugin_json):
-    """Bump version to '<prefix>+codex.<UTC timestamp>' (byte-preserving)."""
+def _bump_cachebuster(plugin_json, expected_prefix=None):
+    """Bump version to '<prefix>+codex.<UTC timestamp>' (byte-preserving).
+    [2.3] expected_prefix: 期望的版本前缀（取自运行版 plugin.json）；
+    修复 .agents 源版本落后时仅换时间戳、不升级前缀的 bug。"""
     import datetime, re as _re
     with open(plugin_json, "rb") as f:
         data = f.read()
@@ -170,9 +172,11 @@ def _bump_cachebuster(plugin_json):
     if not m:
         raise RuntimeError(f"No version field in {plugin_json}")
     ver = m.group(1).decode("utf-8", errors="replace")
-    prefix = ver.split("+")[0] if "+" in ver else ver
+    prefix = expected_prefix or (ver.split("+")[0] if "+" in ver else ver)
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
     new_ver = f"{prefix}+codex.{ts}"
+    if expected_prefix:
+        log("cachebuster prefix: " + (ver.split("+")[0] if "+" in ver else ver) + " -> " + expected_prefix + " (from runtime)")
     data = data.replace(m.group(0), b'"version": "' + new_ver.encode() + b'"', 1)
     with open(plugin_json, "wb") as f:
         f.write(data)
@@ -220,7 +224,16 @@ def cmd_reinstall(agents_dir, plugin, marketplace, run_dir):
         rp = os.path.join(run_dir, rel)
         if os.path.exists(rp):
             _copy_if_diff(rp, os.path.join(skill_dir, dst_rel), f"skills/{base}/{dst_rel}")
-    ver = _bump_cachebuster(os.path.join(agents_dir, ".codex-plugin", "plugin.json"))
+    exp_prefix = None
+    rp = os.path.join(run_dir, ".codex-plugin", "plugin.json")
+    if os.path.exists(rp):
+        try:
+            with open(rp, "r", encoding="utf-8") as _f:
+                _rv = json.load(_f).get("version", "")
+            exp_prefix = _rv.split("+")[0] if _rv else None
+        except Exception:
+            pass
+    ver = _bump_cachebuster(os.path.join(agents_dir, ".codex-plugin", "plugin.json"), expected_prefix=exp_prefix)
     cli = _codex_cli()
     log(f"Reinstalling {plugin}@{marketplace} via {cli} ...")
     r = subprocess.run([cli, "plugin", "add", f"{plugin}@{marketplace}"],
@@ -893,16 +906,224 @@ def cmd_pre_check(owner, repo, repo_dir):
 # PUSH (with auto audit gate)
 # ═══════════════════════════════════════════════════════════════════
 
-def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=None, marketplace="personal"):
-    """One-shot plugin publish: runtime(main) -> local source repo -> audit gate
-    -> git push -> (optional) .agents source + cachebuster + codex plugin add.
-    Works for any plugin; not tied to a specific runtime."""
-    log("=" * 50)
-    log("SYNC PLUGIN: runtime(main) -> local source -> audit -> git" + (" -> reinstall" if agents_dir else ""))
-    log("=" * 50)
-    run_dir = os.path.abspath(run_dir)
+# ─── [2.3] 数据回灌：运行时独有规则按 id 合并回源码库 ─────────────
+RULE_MERGE_FILES = [
+    "engine/evo/rules/interception_rules.json",
+    "engine/evo/rules/success_patterns.json",
+    "engine/evo/rules/interception_rules_archive.json",
+    "engine/evo/rules/success_patterns_archive.json",
+]
+# [2.3] hooks 回灌清单（runtime → 源码库，与运行版 sync.ps1 SH-Sync 一致）
+HOOK_SYNC_FILES = [
+    "diegin_pre_reply.ps1", "diegin_pre_tool.ps1", "diegin_post_tool.ps1",
+    "diegin_stop.ps1", "diegin_session_start.ps1", "diegin_notify.ps1",
+    "diegin_notify_wrapper.ps1", "diegin_session_image_clean.ps1",
+    "monitor_v3.py", "hooks.json",
+]
+
+def _detect_eol(path):
+    """检测文本文件行尾：含 CRLF 返回 '\\r\\n'，否则 '\\n'。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(8192)
+        return "\r\n" if b"\r\n" in raw else "\n"
+    except Exception:
+        return "\n"
+
+def _load_json_list(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+def _merge_rules_by_id(src_file, run_file, label):
+    """把运行时独有规则（按 id）合并进源码库规则文件；写回保持原行尾。返回新增条数。"""
+    if not os.path.exists(run_file):
+        log(f"rules skip (no runtime file): {label}")
+        return 0
+    if not os.path.exists(src_file):
+        with open(src_file, "w", encoding="utf-8", newline="") as f:
+            f.write("[]")
+    src = _load_json_list(src_file)
+    run = _load_json_list(run_file)
+    ids = {x.get("id") for x in src if isinstance(x, dict)}
+    extra = [x for x in run if isinstance(x, dict) and x.get("id") not in ids]
+    if not extra:
+        log(f"rules consistent: {label} ({len(src)})")
+        return 0
+    merged = src + extra
+    eol = _detect_eol(src_file)
+    text = json.dumps(merged, ensure_ascii=False, indent=2).replace("\n", eol)
+    with open(src_file, "w", encoding="utf-8", newline="") as f:
+        f.write(text + eol)
+    log(f"rules merged: {label} src={len(src)} +rt-only={len(extra)} = {len(merged)}")
+    for x in extra:
+        log(f"  rt-only: {x.get('id')}")
+    return len(extra)
+
+def _sync_domain_rules(src_dir, run_dir):
+    """domain_rules 双向补齐缺失文件。返回变更数。"""
+    import shutil
+    changed = 0
     if not os.path.isdir(run_dir):
-        raise RuntimeError(f"Runtime dir not found: {run_dir}")
+        return 0
+    os.makedirs(src_dir, exist_ok=True)
+    sf = {f for f in os.listdir(src_dir) if f.endswith(".json")}
+    rf = {f for f in os.listdir(run_dir) if f.endswith(".json")}
+    for f in sorted(rf - sf):
+        shutil.copy2(os.path.join(run_dir, f), os.path.join(src_dir, f))
+        log(f"domain_rules rt→src: {f}")
+        changed += 1
+    for f in sorted(sf - rf):
+        shutil.copy2(os.path.join(src_dir, f), os.path.join(run_dir, f))
+        log(f"domain_rules src→rt: {f}")
+        changed += 1
+    if changed == 0:
+        log("domain_rules consistent")
+    return changed
+
+def _sync_runtime_data(run_dir, repo_dir):
+    """[2.3] 数据回灌：规则 merge + hooks rt→src + references src→rt。返回变更文件数。"""
+    changed = 0
+    log("=" * 50)
+    log("DATA SYNC: runtime data -> source repo")
+    log("=" * 50)
+    for rel in RULE_MERGE_FILES:
+        s = os.path.join(repo_dir, rel.replace("/", os.sep))
+        r = os.path.join(run_dir, rel.replace("/", os.sep))
+        changed += _merge_rules_by_id(s, r, rel)
+    changed += _sync_domain_rules(
+        os.path.join(repo_dir, "engine", "evo", "rules", "domain_rules"),
+        os.path.join(run_dir, "engine", "evo", "rules", "domain_rules"))
+    sh_dir = os.path.join(repo_dir, "hooks")
+    rh_dir = os.path.join(run_dir, "hooks")
+    for f in HOOK_SYNC_FILES:
+        rp = os.path.join(rh_dir, f)
+        sp = os.path.join(sh_dir, f)
+        if os.path.exists(rp):
+            changed += _copy_if_diff(rp, sp, f"hooks/{f}")
+    ref_src = os.path.join(repo_dir, "references")
+    ref_run = os.path.join(run_dir, "references")
+    if os.path.isdir(ref_src):
+        os.makedirs(ref_run, exist_ok=True)
+        for f in os.listdir(ref_src):
+            if f.endswith(".md"):
+                changed += _copy_if_diff(os.path.join(ref_src, f), os.path.join(ref_run, f), f"references/{f}")
+    if changed == 0:
+        log("All runtime data consistent (nothing to merge).")
+    else:
+        log(f"Data sync done: {changed} file(s) updated.")
+    return changed
+
+def _read_version_prefix(path):
+    """读 plugin.json 的版本前缀（3.9.0+codex.<ts> → 3.9.0）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            v = json.load(f).get("version", "")
+        return v.split("+")[0] if v else ""
+    except Exception:
+        return ""
+
+def _check_version_consistency(run_dir, repo_dir):
+    """[2.3] 核对版本四处一致：运行版 plugin.json / 源码库 plugin.json / SKILL.md / README 徽章。
+    返回 (issues, notes)；issues 为不一致项（由调用方决定是否阻断）。"""
+    issues, notes = [], []
+    exp = _read_version_prefix(os.path.join(run_dir, ".codex-plugin", "plugin.json"))
+    if not exp:
+        notes.append("运行版 plugin.json 缺失/无法读取，跳过版本核对")
+        return issues, notes
+    repo_v = _read_version_prefix(os.path.join(repo_dir, ".codex-plugin", "plugin.json"))
+    if repo_v != exp:
+        issues.append(f"plugin.json 前缀不一致: 运行版={exp} vs 源码库={repo_v}")
+    else:
+        notes.append(f"plugin.json 前缀一致: {exp}")
+    sk = os.path.join(repo_dir, "SKILL.md")
+    if os.path.exists(sk):
+        try:
+            with open(sk, "r", encoding="utf-8") as f:
+                head = f.read(4000)
+            m = re.search(r'(?m)^\s*version:\s*["\']?v?([0-9]+\.[0-9]+\.[0-9]+)', head)
+            if m and m.group(1) != exp:
+                issues.append(f"SKILL.md version=v{m.group(1)} vs plugin.json={exp}")
+            elif m:
+                notes.append(f"SKILL.md version 一致: v{exp}")
+        except Exception:
+            pass
+    readme = os.path.join(repo_dir, "README.md")
+    if os.path.exists(readme):
+        try:
+            with open(readme, "r", encoding="utf-8") as f:
+                rtext = f.read()
+            mm = re.search(r'version-([0-9]+\.[0-9]+\.[0-9]+)', rtext)
+            if mm and mm.group(1) != exp:
+                issues.append(f"README 徽章 version-{mm.group(1)} vs plugin.json={exp}")
+            elif mm:
+                notes.append(f"README 徽章 version 一致: {exp}")
+        except Exception:
+            pass
+    return issues, notes
+
+def _runtime_python(run_dir):
+    venv = os.path.join(run_dir, "bin", ".venv", "Scripts", "python.exe")
+    return venv if os.path.exists(venv) else sys.executable
+
+def cmd_verify_runtime(run_dir, skip=False):
+    """[2.3] 运行版验证前置：test_all + self_check（全绿才继续发布）。
+    返回 True 全部通过；False 中止。"""
+    log("=" * 50)
+    log("RUNTIME VERIFY: test_all + self_check (pre-publish gate)")
+    log("=" * 50)
+    if skip:
+        log("Runtime verify skipped by user (--skip-runtime-verify).")
+        return True
+    py = _runtime_python(run_dir)
+    ok_all = True
+    for name, rel in (("test_all", "engine/test_all.py"), ("self_check", "engine/diegin_self_check.py")):
+        p = os.path.join(run_dir, rel.replace("/", os.sep))
+        if not os.path.exists(p):
+            log(f"skip (missing): {rel}")
+            continue
+        log(f"Running {name}: {p}")
+        try:
+            r = subprocess.run([py, p], cwd=os.path.dirname(p), capture_output=True, timeout=900)
+            tail = r.stdout.decode("utf-8", errors="replace").strip().splitlines()[-4:]
+            for line in tail:
+                log(line.strip()[:160])
+            if r.returncode != 0:
+                ok_all = False
+                log(f"FAILED: {name} exit {r.returncode}")
+            else:
+                log(f"PASSED: {name}")
+        except subprocess.TimeoutExpired:
+            ok_all = False
+            log(f"FAILED: {name} timeout (>900s)")
+        except Exception as e:
+            ok_all = False
+            log(f"FAILED: {name} {e}")
+    if ok_all:
+        log("RUNTIME VERIFY: PASSED")
+    else:
+        log("RUNTIME VERIFY: FAILED - do not publish until fixed.")
+    return ok_all
+
+def cmd_trail_append(trail_path, title, bullets):
+    """[2.3] 追加 trail 记录（UTF-8 NoBOM，LF 行尾）。"""
+    if not trail_path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(trail_path)), exist_ok=True)
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = ["", "", f"### {title}", f"- 时间：{ts}"]
+    for b in bullets:
+        lines.append(f"- {b}")
+    lines.append("")
+    text = "\n".join(lines) + "\n"
+    with open(trail_path, "a", encoding="utf-8", newline="") as f:
+        f.write(text)
+    log(f"trail appended: {trail_path}")
+
+def _sync_plugin_info(run_dir, repo_dir):
+    """门面同步：PLUGIN_INFO_FILES + assets（运行版 → 源码库）。返回 changed 列表。"""
+    run_dir = os.path.abspath(run_dir)
     changed = []
     for rel in PLUGIN_INFO_FILES:
         rp = os.path.join(run_dir, rel.replace("/", os.sep))
@@ -930,10 +1151,80 @@ def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=No
         log("All plugin info files consistent. No sync needed.")
     else:
         log(f"Sync done: {len(changed)} file(s) updated.")
+    return changed
+
+def cmd_sync(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=None, marketplace="personal"):
+    """One-shot plugin publish: runtime(main) -> local source repo -> audit gate
+    -> git push -> (optional) .agents source + cachebuster + codex plugin add.
+    Works for any plugin; not tied to a specific runtime."""
+    log("=" * 50)
+    log("SYNC PLUGIN: runtime(main) -> local source -> audit -> git" + (" -> reinstall" if agents_dir else ""))
+    log("=" * 50)
+    if not os.path.isdir(os.path.abspath(run_dir)):
+        raise RuntimeError(f"Runtime dir not found: {run_dir}")
+    _sync_plugin_info(run_dir, repo_dir)
     log("Running audit gate + push...")
     cmd_push(owner, repo, message, repo_dir)
     if agents_dir and plugin:
         cmd_reinstall(agents_dir, plugin, marketplace, run_dir)
+
+def cmd_all(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=None, marketplace="personal",
+            skip_runtime_verify=False, strict_version=False, include_data=True, trail_path=None):
+    """[2.3] 一键发布全环节：runtime verify -> data sync -> plugin info sync -> version check
+    -> repo verify -> audit gate -> push -> reinstall -> scan-mindol -> trail.
+    任何开发完成后一条命令同步所有环节。"""
+    log("=" * 60)
+    log("ALL-IN-ONE PUBLISH (v2.3): 全环节一键同步")
+    log("=" * 60)
+    if not os.path.isdir(os.path.abspath(run_dir)):
+        raise RuntimeError(f"Runtime dir not found: {run_dir}")
+    if not os.path.isdir(os.path.abspath(repo_dir)):
+        raise RuntimeError(f"Repo dir not found: {repo_dir}")
+    # 1. 运行版验证（test_all + self_check 全绿）
+    if not cmd_verify_runtime(run_dir, skip=skip_runtime_verify):
+        raise RuntimeError("RUNTIME VERIFY FAILED - fix before publish")
+    # 2. 数据回灌（规则 merge + hooks + references）
+    if include_data:
+        _sync_runtime_data(run_dir, repo_dir)
+    # 3. 门面同步（SKILL.md/README/AGENTS/LICENSE/plugin.json/assets）
+    _sync_plugin_info(run_dir, repo_dir)
+    # 4. 版本四处核对
+    v_issues, v_notes = _check_version_consistency(run_dir, repo_dir)
+    for n in v_notes:
+        log(f"VERSION: {n}")
+    for i in v_issues:
+        log(f"VERSION MISMATCH: {i}")
+    if v_issues and strict_version:
+        raise RuntimeError("VERSION MISMATCH (--strict-version)")
+    # 5. 源码库验证（pytest + self-check）
+    if not cmd_verify(repo_dir):
+        raise RuntimeError("REPO VERIFY FAILED - fix before publish")
+    # 6. audit 门禁 + 分叉检测 + push + 远端核验
+    cmd_push(owner, repo, message, repo_dir)
+    # 7. 重装插件（可选 --agents + --plugin）
+    if agents_dir and plugin:
+        cmd_reinstall(agents_dir, plugin, marketplace, run_dir)
+    # 8. scan-mindol 最后保障
+    try:
+        hits, _ = cmd_scan_mindol(apply=False)
+        if hits:
+            log(f"WARNING: memory.db 敏感扫描 {hits} 命中 - 发布已完成，请尽快处理")
+        else:
+            log("scan-mindol: 0 命中 (clean)")
+    except Exception as e:
+        log(f"scan-mindol skipped: {e}")
+    # 9. trail 追加
+    if trail_path:
+        bullets = [
+            "all-in-one 发布：运行版验证 → 数据回灌 → 门面同步 → 版本核对 → 源码库验证 → audit → push → 重装 → scan-mindol",
+            f"仓库：{owner}/{repo}（{repo_dir}）",
+        ]
+        if v_issues:
+            bullets.append("版本不一致（未阻断）：" + "; ".join(v_issues))
+        cmd_trail_append(trail_path, "CheckPush v2.3 all-in-one", bullets)
+    log("=" * 60)
+    log("ALL-IN-ONE PUBLISH COMPLETE")
+    log("=" * 60)
 
 def cmd_push(owner, repo, message, repo_dir):
     """Push local changes (auto-runs audit first)."""
@@ -1120,8 +1411,8 @@ def ensure_token(cdp):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="GitHub Publish Automation")
-    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize", "verify", "scan-mindol"],
-                       help="Action: pre-check (audit only, no push) | push (auto audit + push) | ...")
+    parser.add_argument("action", choices=["pre-check", "login", "push", "release", "topics", "api", "audit", "sync", "sanitize", "verify", "scan-mindol", "all"],
+                       help="Action: pre-check (audit only, no push) | push (auto audit + push) | all (一键全环节) | ...")
     parser.add_argument("--owner", required=False, help="GitHub owner (e.g. linsong-dev)")
     parser.add_argument("--repo", required=False, help="Repository name")
     
@@ -1131,6 +1422,10 @@ if __name__ == "__main__":
     parser.add_argument("--agents", help=".agents plugin source dir to update + reinstall (for 'sync' action)")
     parser.add_argument("--plugin", help="Plugin name to reinstall (e.g. diegin), with --agents")
     parser.add_argument("--marketplace", default="personal", help="Marketplace for reinstall (default: personal)")
+    parser.add_argument("--trail", help="Trail markdown file to append (for 'all' action)")
+    parser.add_argument("--skip-runtime-verify", action="store_true", help="all: skip runtime test_all/self_check")
+    parser.add_argument("--strict-version", action="store_true", help="all: fail on version mismatch")
+    parser.add_argument("--no-data", action="store_true", help="all: skip runtime data sync (rules/hooks/refs)")
     parser.add_argument("--message", default="Update", help="Commit message")
     parser.add_argument("--tag", default="v1.0.0", help="Release tag")
     parser.add_argument("--name", help="Release name (default: same as tag)")
@@ -1145,7 +1440,7 @@ if __name__ == "__main__":
     parser.add_argument("--data", help="JSON data for API call")
     args = parser.parse_args()
     if args.dir: REPO_DIR = os.path.abspath(args.dir)
-    need_repo = {"push", "release", "topics", "api", "pre-check", "sync"}
+    need_repo = {"push", "release", "topics", "api", "pre-check", "sync", "all"}
     if args.action in need_repo and (not args.owner or not args.repo):
         parser.error(f"--owner and --repo are required for '{args.action}' action")
 
@@ -1167,6 +1462,11 @@ if __name__ == "__main__":
     elif args.action == "sync":
         if not args.run: parser.error("--run is required for 'sync' action")
         cmd_sync(args.owner, args.repo, args.message, REPO_DIR, args.run, args.agents, args.plugin, args.marketplace)
+    elif args.action == "all":
+        if not args.run: parser.error("--run is required for 'all' action")
+        cmd_all(args.owner, args.repo, args.message, REPO_DIR, args.run, args.agents, args.plugin,
+                args.marketplace, skip_runtime_verify=args.skip_runtime_verify,
+                strict_version=args.strict_version, include_data=not args.no_data, trail_path=args.trail)
     elif args.action == "audit":
         cmd_audit(REPO_DIR)
     elif args.action == "sanitize":
