@@ -59,6 +59,9 @@ SENSITIVE_PATTERNS = [
     r"C:\\Users\\[^\\\"']+",          # Windows 用户目录绝对路径
     r"E:\\项目\\Codex_便携版",           # 本机便携版安装路径
     r"E:\\项目\\开发",                   # 本机开发目录
+    r"C:\\\\Users\\\\[^\\\\\"\']+",   # JSON 转义形态（双反斜杠）
+    r"E:\\\\项目\\\\Codex_便携版",             # JSON 转义形态（双反斜杠）
+    r"E:\\\\项目\\\\开发",                     # JSON 转义形态（双反斜杠）
     r"ghp_[A-Za-z0-9]{20,}",                 # GitHub PAT
     r"github_pat_[A-Za-z0-9_]{20,}",         # GitHub fine-grained PAT
     r"gho_[A-Za-z0-9]{20,}",                 # GitHub OAuth
@@ -576,7 +579,7 @@ def cmd_audit(repo_dir):
                 if s.startswith("#") or s.startswith("//"): continue
                 if s.count("?") > 3:
                     # SQL VALUES 占位符不是乱码
-                    if "VALUES" in s or "INSERT" in s: continue
+                    if any(k in s for k in ("VALUES", "INSERT", "UPDATE")): continue
                     issues.append((rel, "GARBLED", f"L{i+1}: {s[:60]}")); break
             ok += 1
 
