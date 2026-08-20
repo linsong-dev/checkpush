@@ -899,6 +899,14 @@ def cmd_pre_check(owner, repo, repo_dir):
     print(f"  Directory    : {repo_dir}")
     print()
     _, issues = cmd_audit(repo_dir)
+    l_issues, l_notes = _check_mindol_link(repo_dir)
+    for n in l_notes:
+        print(f"  [LINK] {n}")
+    for i in l_issues:
+        print(f"  [LINK MISMATCH] {i}")
+    if l_issues:
+        issues = issues or []
+        issues += l_issues
     if issues:
         print(f"\n  [RESULT] {len(issues)} issue(s) found. Fix before push.")
         return False
@@ -1065,6 +1073,39 @@ def _check_version_consistency(run_dir, repo_dir):
             pass
     return issues, notes
 
+def _check_mindol_link(repo_dir):
+    """[2026-08-20] 迭进×Mindol 联动版本校验：发布 diegin 前必须 mindol 版本前缀一致。
+    迭进运行时依赖独立 mindol 插件（非自包含）；防双仓未来版本分裂。
+    返回 (issues, notes)；由调用方决定是否阻断。"""
+    issues, notes = [], []
+    exp = _read_version_prefix(os.path.join(repo_dir, ".codex-plugin", "plugin.json"))
+    if not exp:
+        notes.append("plugin.json 缺失/无法读取，跳过联动校验")
+        return issues, notes
+    mver = ""
+    # mindol 源码库默认取 diegin 仓的兄弟目录；可用环境变量 MINDOL_REPO 覆盖（不硬编码个人路径）
+    mdir = os.environ.get("MINDOL_REPO") or os.path.join(os.path.dirname(os.path.abspath(repo_dir)), "mindol")
+    m_plugin = os.path.join(mdir, ".codex-plugin", "plugin.json")
+    if os.path.exists(m_plugin):
+        mver = _read_version_prefix(m_plugin)
+    if not mver:
+        m_py = os.path.join(mdir, "pyproject.toml")
+        try:
+            with open(m_py, "r", encoding="utf-8") as f:
+                t = f.read()
+            mm = re.search(r'(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', t)
+            mver = mm.group(1) if mm else ""
+        except Exception:
+            pass
+    if not mver:
+        notes.append(f"mindol 版本无法读取（{mdir}），跳过联动校验")
+        return issues, notes
+    if mver != exp:
+        issues.append(f"迭进×Mindol 版本分裂: diegin={exp} vs mindol={mver} — 需先发布/对齐 mindol")
+    else:
+        notes.append(f"迭进×Mindol 联动版本一致: {exp}")
+    return issues, notes
+
 def _runtime_python(run_dir):
     venv = os.path.join(run_dir, "bin", ".venv", "Scripts", "python.exe")
     return venv if os.path.exists(venv) else sys.executable
@@ -1080,6 +1121,24 @@ def cmd_verify_runtime(run_dir, skip=False):
         return True
     py = _runtime_python(run_dir)
     ok_all = True
+    # [2026-08-20] 迭进×Mindol 非自包含联动：运行时 mindol 必须解析到 venv 独立包（内置副本已移除）
+    sc_probe = os.path.join(run_dir, "engine", "diegin_self_check.py")
+    if os.path.exists(sc_probe):
+        try:
+            r = subprocess.run([py, "-c",
+                                "import mindol, os; p=os.path.dirname(mindol.__file__); "
+                                "b='diegin'+os.sep+'engine'+os.sep+'mindol'; "
+                                "assert b not in p, 'builtin copy still in use: '+p; "
+                                "print('mindol -> '+p)"],
+                               capture_output=True, timeout=60)
+            if r.returncode == 0:
+                log("MINDOL LINK: runtime mindol 解析到独立包 (非自包含 OK): " + r.stdout.decode("utf-8", errors="replace").strip()[:160])
+            else:
+                ok_all = False
+                log("MINDOL LINK FAILED: " + r.stderr.decode("utf-8", errors="replace").strip()[:200])
+        except Exception as e:
+            ok_all = False
+            log(f"MINDOL LINK CHECK ERROR: {e}")
     for name, rel in (("test_all", "engine/test_all.py"), ("self_check", "engine/diegin_self_check.py")):
         p = os.path.join(run_dir, rel.replace("/", os.sep))
         if not os.path.exists(p):
@@ -1199,6 +1258,14 @@ def cmd_all(owner, repo, message, repo_dir, run_dir, agents_dir=None, plugin=Non
         log(f"VERSION MISMATCH: {i}")
     if v_issues and strict_version:
         raise RuntimeError("VERSION MISMATCH (--strict-version)")
+    # 4.5 迭进×Mindol 联动校验（防双仓版本分裂；mindol 未对齐一律阻断）
+    l_issues, l_notes = _check_mindol_link(repo_dir)
+    for n in l_notes:
+        log(f"LINK: {n}")
+    for i in l_issues:
+        log(f"LINK MISMATCH: {i}")
+    if l_issues:
+        raise RuntimeError("MINDOL LINK MISMATCH - 先发布/对齐 mindol 版本再推 diegin")
     # 5. 源码库验证（pytest + self-check）
     if not cmd_verify(repo_dir):
         raise RuntimeError("REPO VERIFY FAILED - fix before publish")
